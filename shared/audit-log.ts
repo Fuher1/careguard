@@ -1,6 +1,14 @@
 /**
  * Append-only audit log for high-signal events.
  * Implements #78: Append JSONL records, log events, rotate logs, and expose GET /agent/audit.
+ *
+ * File locking — proper-lockfile (issue #1386): v4.1.2 is the latest release
+ * (published 2022-06-24) and no newer major exists; the package is a stable,
+ * widely used cooperative file-lock primitive with no known vulnerabilities. We
+ * intentionally stay on it rather than migrating to a Redis-based lock because
+ * this lock must work when REDIS_URL is unset (the app falls back to in-process
+ * state), so a Redis lock cannot replace it without changing semantics. See
+ * docs/tech-stack.md → "Dependency version pairing".
  */
 
 import { appendFileSync, existsSync, mkdirSync, statSync, unlinkSync, renameSync, readFileSync, openSync, readSync, closeSync, writeFileSync } from "fs";

@@ -133,38 +133,46 @@ describe('Independent Dashboard Fetches (Issue #283)', () => {
     });
 
     it('should allow transaction fetch timeout without blocking agent info', async () => {
-      const timeouts = {
-        agentInfoTimeout: 100,
-        spendingTimeout: 150,
-        transactionsTimeout: 5000, // Much slower
-      };
+      // Use fake timers so the 5000ms "slow" fetch is advanced virtually rather
+      // than awaited for real. Awaiting a real 5000ms setTimeout under Vitest's
+      // default 5000ms per-test timeout made this test time out / flake (#1102).
+      vi.useFakeTimers();
+      try {
+        const timeouts = {
+          agentInfoTimeout: 100,
+          spendingTimeout: 150,
+          transactionsTimeout: 5000, // Much slower
+        };
 
-      const results: Record<string, string> = {};
+        const results: Record<string, string> = {};
 
-      // Simulate parallel fetches with different timeouts
-      const fetchAgentInfo = new Promise(resolve => {
-        setTimeout(() => {
-          results.agentInfo = 'loaded';
-          resolve('agentInfo');
-        }, timeouts.agentInfoTimeout);
-      });
+        // Simulate parallel fetches with different timeouts
+        void new Promise((resolve) => {
+          setTimeout(() => {
+            results.agentInfo = 'loaded';
+            resolve('agentInfo');
+          }, timeouts.agentInfoTimeout);
+        });
 
-      const fetchTransactions = new Promise(resolve => {
-        setTimeout(() => {
-          results.transactions = 'loaded';
-          resolve('transactions');
-        }, timeouts.transactionsTimeout);
-      });
+        void new Promise((resolve) => {
+          setTimeout(() => {
+            results.transactions = 'loaded';
+            resolve('transactions');
+          }, timeouts.transactionsTimeout);
+        });
 
-      // After 200ms, only agentInfo should be loaded
-      await new Promise(resolve => setTimeout(resolve, 200));
+        // After 200ms, only agentInfo should be loaded
+        await vi.advanceTimersByTimeAsync(200);
 
-      expect(results.agentInfo).toBe('loaded');
-      expect(results.transactions).toBeUndefined();
+        expect(results.agentInfo).toBe('loaded');
+        expect(results.transactions).toBeUndefined();
 
-      // Later, transactions will be loaded
-      await new Promise(resolve => setTimeout(resolve, 5000));
-      expect(results.transactions).toBe('loaded');
+        // Later, transactions will be loaded
+        await vi.advanceTimersByTimeAsync(5000);
+        expect(results.transactions).toBe('loaded');
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 

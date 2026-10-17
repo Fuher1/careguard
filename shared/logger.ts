@@ -1,3 +1,8 @@
+// pino/pino-pretty version pairing (issue #1394): pino-pretty's major is
+// independent of pino's. `pino ^10.3.1` (runtime) pairs with the current
+// `pino-pretty ^13.1.3` (dev-time formatter, used only via the transport
+// below when NODE_ENV !== "production"). Bump both together and re-verify
+// pretty dev logs. See docs/tech-stack.md → "Dependency version pairing".
 import pino from "pino";
 import { getRequestId, getAgentRunId } from "./request-context.ts";
 

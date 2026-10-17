@@ -30,24 +30,25 @@ function buildApp(defaultLimit: string, billAuditLimit?: string) {
   return app;
 }
 
-const oversized = JSON.stringify({ data: "x".repeat(70_000) });    // ~70kb
-const medium    = JSON.stringify({ data: "x".repeat(200_000) });   // ~200kb
-const small     = JSON.stringify({ task: "Check drug prices" });
+const oversized20k = JSON.stringify({ data: "x".repeat(25_000) });   // ~25kb
+const oversized70k = JSON.stringify({ data: "x".repeat(70_000) });   // ~70kb
+const medium       = JSON.stringify({ data: "x".repeat(200_000) });  // ~200kb
+const small        = JSON.stringify({ task: "Check drug prices" });
 
-describe("#92 body-size limit — 64kb default", () => {
-  const app = buildApp("64kb");
+describe("#92/#1071 body-size limit — 20kb default", () => {
+  const app = buildApp(process.env.JSON_BODY_LIMIT ?? "20kb");
 
-  it("returns 413 when POST body exceeds 64kb", async () => {
+  it("returns 413 when POST body exceeds 20kb", async () => {
     const res = await request(app)
       .post("/agent/run")
       .set("Content-Type", "application/json")
-      .send(oversized);
+      .send(oversized20k);
 
     expect(res.status).toBe(413);
     expect(res.body.error).toMatch(/too large/i);
   });
 
-  it("does not 413 when body is within 64kb", async () => {
+  it("does not 413 when body is within 20kb", async () => {
     const res = await request(app)
       .post("/agent/run")
       .set("Content-Type", "application/json")
@@ -74,7 +75,7 @@ describe("#92 body-size limit — bill-audit route gets 256kb", () => {
     const res = await request(app)
       .post("/agent/run")
       .set("Content-Type", "application/json")
-      .send(oversized);
+      .send(oversized70k);
 
     expect(res.status).toBe(413);
   });

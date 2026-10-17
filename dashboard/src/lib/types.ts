@@ -136,3 +136,81 @@ export type DisputeLetter = {
   emailHtml: string;
   generatedAt: string;
 };
+
+// ── Vitals (#1237) ────────────────────────────────────────────────────────────
+
+export const VITAL_TYPES = ["weight", "blood_pressure", "glucose"] as const;
+export type VitalType = (typeof VITAL_TYPES)[number];
+
+/** Default unit per vital type — mirrors services/vitals/db.ts. */
+export const VITAL_DEFAULT_UNIT: Record<VitalType, string> = {
+  weight: "lb",
+  blood_pressure: "mmHg",
+  glucose: "mg/dL",
+};
+
+export const VitalSchema = z.object({
+  id: z.string(),
+  recipient_id: z.string(),
+  type: z.enum(VITAL_TYPES),
+  value: z.number(),
+  secondary_value: z.number().nullable(),
+  unit: z.string(),
+  timestamp: z.string(),
+});
+
+export type Vital = z.infer<typeof VitalSchema>;
+
+export const AdherenceTimelineEventSchema = z.object({
+  id: z.string(),
+  drug: z.string(),
+  date: z.string(),
+  status: z.enum(["pending", "confirmed", "skipped", "flagged"]),
+});
+
+export type AdherenceTimelineEvent = z.infer<typeof AdherenceTimelineEventSchema>;
+
+/** Human-readable reading, e.g. "128/82 mmHg" or "162 lb". */
+export function formatVital(v: Pick<Vital, "type" | "value" | "secondary_value" | "unit">): string {
+  const reading =
+    v.type === "blood_pressure" && v.secondary_value != null
+      ? `${v.value}/${v.secondary_value}`
+      : `${v.value}`;
+  return `${reading} ${v.unit}`;
+}
+
+// ── Allergies & Adverse Reactions (Issue #1230) ────────────────────────────────
+
+export const AllergySeveritySchema = z.enum([
+  'mild',
+  'moderate',
+  'severe',
+  'life_threatening',
+]);
+
+export type AllergySeverity = z.infer<typeof AllergySeveritySchema>;
+
+export const RecipientAllergySchema = z.object({
+  id: z.string().min(1),
+  substance: z.string().min(1),
+  severity: AllergySeveritySchema,
+  reaction: z.string().optional(),
+  notes: z.string().optional(),
+  createdAt: z.string().min(1),
+  updatedAt: z.string().optional(),
+});
+
+export type RecipientAllergy = z.infer<typeof RecipientAllergySchema>;
+
+// ── Co-Caregiver Presence (Issue #1231) ───────────────────────────────────────
+
+export const ItemPresenceEntrySchema = z.object({
+  caregiverId: z.string().min(1),
+  caregiverName: z.string().min(1),
+  avatar: z.string().optional(),
+  lastViewedAt: z.string().min(1),
+});
+
+export type ItemPresenceEntry = z.infer<typeof ItemPresenceEntrySchema>;
+
+export type ItemPresenceMap = Record<string, ItemPresenceEntry[]>;

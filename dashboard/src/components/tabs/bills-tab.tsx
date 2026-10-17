@@ -10,14 +10,30 @@ import {
   BillAuditResultSchema,
   type RecipientProfile,
   type DisputeLetter,
+  type ItemPresenceMap,
+  type CaregiverProfile,
 } from "../../lib/types";
 import { BillLineItemsVirtualized } from "../primitives/bill-line-items-virtualized";
 import { sanitizeAnnotation } from "../../lib/sanitize";
 import type { AgentResult } from "../types";
+import { getTranslations, type Locale } from "../../i18n";
+import { AGENT_URL } from "../../lib/agent-url";
+import { agentFetch } from "../../lib/agent-fetch";
+
+export interface EditableLineItem {
+  id: string;
+  description: string;
+  cptCode?: string;
+  quantity: number;
+  chargedAmount: number;
+}
 
 export interface BillsTabProps {
   agentResult: AgentResult | null;
   recipient: RecipientProfile;
+  locale?: Locale;
+  currentCaregiver?: CaregiverProfile;
+  linkedCaregivers?: CaregiverProfile[];
 }
 
 /**
@@ -87,7 +103,7 @@ export function BillsTab({ agentResult, recipient }: BillsTabProps) {
       const letter: DisputeLetter = {
         billId: `bill-${Date.now()}`,
         recipientName: recipient.name,
-        facility: recipient.facility || "General Hospital",
+        facility: facilityName || recipient.facility || "General Hospital",
         totalOvercharge: auditResult.totalOvercharge,
         errorCount: auditResult.errorCount,
         emailText: generateDisputeText(auditResult, recipient, annotations),

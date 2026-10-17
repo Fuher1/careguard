@@ -15,19 +15,29 @@ import OpenAI from "openai";
 import { Mppx, Store } from "mppx/server";
 import { stellar } from "@stellar/mpp/charge/server";
 import { USDC_SAC_TESTNET } from "@stellar/mpp";
-import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from "fs";
+import {
+  readFileSync,
+  writeFileSync,
+  existsSync,
+  mkdirSync,
+  renameSync,
+} from "fs";
 import { fileURLToPath } from "url";
 import lock from "proper-lockfile";
 import { z } from "zod";
 
 // x402 middleware
-import { applyX402Middleware } from "./shared/x402-middleware.ts";
+import { applyX402Middleware } from "./shared/x402-verify-middleware.ts";
 import { createCorsMiddleware } from "./shared/cors.ts";
 import { applySecurityMiddleware } from "./shared/security-middleware.ts";
 import { createApiDocsRouter } from "./shared/api-docs.ts";
 import { logger } from "./shared/logger.ts";
 import { requireApiKey } from "./shared/auth.ts";
-import { validateTask, getSuspiciousTaskCount } from "./shared/task-validation.ts";
+import { createPharmacyAdminAuth } from "./shared/pharmacy-admin-auth.ts";
+import {
+  validateTask,
+  getSuspiciousTaskCount,
+} from "./shared/task-validation.ts";
 import {
   BillAuditValidationError,
   FAIR_MARKET_RATES,
@@ -35,13 +45,22 @@ import {
   validateBillAuditRequest,
 } from "./shared/bill-audit.ts";
 import { sanitizeUserString } from "./shared/sanitize.ts";
+import { registerKnownNames } from "./shared/redact.ts";
 
 // Sentry (gated by SENTRY_DSN)
 import { initSentry } from "./shared/sentry.ts";
+import {
+  loadRecipientAllergies,
+  addRecipientAllergy,
+  removeRecipientAllergy,
+} from "./shared/allergies.ts";
+import { loadPresenceMap, recordItemView } from "./shared/presence.ts";
+import { extractLineItemsFromBillImage } from "./shared/bill-ocr.ts";
+import { runPriceWatchForRecipient } from "./agent/price-watch.ts";
 
 // Observability
-import { requestContextMiddleware } from "./shared/request-context.ts";
-import { requestLoggerMiddleware } from "./shared/request-logger.ts";
+import { requestLifecycleMiddleware } from "./shared/request-lifecycle.ts";
+import { gracefulShutdown } from "./shared/graceful-shutdown.ts";
 import {
   metricsHandler,
   agentRunsTotal,
@@ -58,10 +77,15 @@ import {
   isPaused,
   type PauseReason,
 } from "./shared/agent-state.ts";
-import { checkWalletBalance, formatResult } from "./shared/wallet-balance.ts";
+import { checkWalletBalance, formatResult, fetchWalletBalances } from "./shared/wallet-balance.ts";
 import { appendAuditEntry, auditRouter } from "./shared/audit-log.ts";
-import { rateLimiters, perRouteLimiters, concurrentRequestsMiddleware } from "./shared/rate-limit.ts";
+import {
+  rateLimiters,
+  perRouteLimiters,
+  concurrentRequestsMiddleware,
+} from "./shared/rate-limit.ts";
 import { agentQueue } from "./shared/agent-queue.ts";
+import { paginateTransactions } from "./shared/transaction-pagination.ts";
 
 // Agent tools
 import {
@@ -73,13 +97,20 @@ import {
   getSpendingTracker,
   resetSpendingTracker,
   SpendingPolicySchema,
+  previewSpendingPolicy,
 } from "./agent/tools.ts";
 import { executeTool, runAgent } from "./agent/runner.ts";
 import { resolveRequestedDosage } from "./services/pharmacy-api/dosage.ts";
 import { createPharmacyPricingStore } from "./services/pharmacy-api/db.ts";
-import { PRICING_DATABASE, getPharmacyPrices, getAvailableDrugs } from "./shared/pharmacy-pricing.ts";
+import {
+  PRICING_DATABASE,
+  getPharmacyPrices,
+  getAvailableDrugs,
+} from "./shared/pharmacy-pricing.ts";
 import { createCareRecipientsStore } from "./services/care-recipients/db.ts";
 import { createCareRecipientsRouter } from "./services/care-recipients/routes.ts";
+import { createVitalsStore } from "./services/vitals/db.ts";
+import { createVitalsRouter } from "./services/vitals/routes.ts";
 import {
   buildCompareResponse,
   DrugRecordSchema,
@@ -104,38 +135,48 @@ import {
 } from "./services/pharmacy-payment/validation.ts";
 
 // --- Environment ---
-const envSchema = z.object({
-  PORT: z.coerce.number().int().min(1, "PORT must be >= 1").max(65535, "PORT must be <= 65535").default(3004),
-  STELLAR_NETWORK: z.enum(["testnet", "public"]).default("testnet"),
-  LLM_API_KEY: z.string().min(1, "LLM_API_KEY required"),
-  AGENT_SECRET_KEY: z.string().min(1, "AGENT_SECRET_KEY required"),
-  PHARMACY_1_PUBLIC_KEY: z.string().min(1, "PHARMACY_1_PUBLIC_KEY required"),
-  BILL_PROVIDER_PUBLIC_KEY: z
-    .string()
-    .min(1, "BILL_PROVIDER_PUBLIC_KEY required"),
-  MPP_SECRET_KEY: z.string().min(1, "MPP_SECRET_KEY required"),
-  LLM_BASE_URL: z.string().min(1).optional(),
-  LLM_MODEL: z.string().min(1).optional(),
-  CAREGIVER_TOKEN: z.string().min(1, "CAREGIVER_TOKEN required"),
-  AGENT_API_KEY: z.string().min(1).optional(),
-  OZ_FACILITATOR_API_KEY: z.string().min(1).optional(),
-  X402_FACILITATOR_URL: z.string().min(1).optional(),
-  BILL_AUDIT_OVERCHARGE_MULTIPLIER: z.coerce.number().positive().default(1.5),
-  BILL_AUDIT_SUGGESTED_MULTIPLIER: z.coerce.number().positive().default(1.2),
-  BILL_AUDIT_UPCODED_MULTIPLIER: z.coerce.number().positive().default(3.0),
-}).refine(
-  (data) => {
-    return (
-      data.BILL_AUDIT_UPCODED_MULTIPLIER > data.BILL_AUDIT_OVERCHARGE_MULTIPLIER &&
-      data.BILL_AUDIT_OVERCHARGE_MULTIPLIER > data.BILL_AUDIT_SUGGESTED_MULTIPLIER &&
-      data.BILL_AUDIT_SUGGESTED_MULTIPLIER > 1.0
-    );
-  },
-  {
-    message: "Invalid bill-audit multipliers config: must satisfy UPCODED > OVERCHARGE > SUGGESTED > 1.0",
-    path: ["BILL_AUDIT_UPCODED_MULTIPLIER"],
-  }
-);
+const envSchema = z
+  .object({
+    PORT: z.coerce
+      .number()
+      .int()
+      .min(1, "PORT must be >= 1")
+      .max(65535, "PORT must be <= 65535")
+      .default(3004),
+    STELLAR_NETWORK: z.enum(["testnet", "public"]).default("testnet"),
+    LLM_API_KEY: z.string().min(1, "LLM_API_KEY required"),
+    AGENT_SECRET_KEY: z.string().min(1, "AGENT_SECRET_KEY required"),
+    PHARMACY_1_PUBLIC_KEY: z.string().min(1, "PHARMACY_1_PUBLIC_KEY required"),
+    BILL_PROVIDER_PUBLIC_KEY: z
+      .string()
+      .min(1, "BILL_PROVIDER_PUBLIC_KEY required"),
+    MPP_SECRET_KEY: z.string().min(1, "MPP_SECRET_KEY required"),
+    LLM_BASE_URL: z.string().min(1).optional(),
+    LLM_MODEL: z.string().min(1).optional(),
+    CAREGIVER_TOKEN: z.string().min(1, "CAREGIVER_TOKEN required"),
+    AGENT_API_KEY: z.string().min(1).optional(),
+    OZ_FACILITATOR_API_KEY: z.string().min(1).optional(),
+    X402_FACILITATOR_URL: z.string().min(1).optional(),
+    BILL_AUDIT_OVERCHARGE_MULTIPLIER: z.coerce.number().positive().default(1.5),
+    BILL_AUDIT_SUGGESTED_MULTIPLIER: z.coerce.number().positive().default(1.2),
+    BILL_AUDIT_UPCODED_MULTIPLIER: z.coerce.number().positive().default(3.0),
+  })
+  .refine(
+    (data) => {
+      return (
+        data.BILL_AUDIT_UPCODED_MULTIPLIER >
+          data.BILL_AUDIT_OVERCHARGE_MULTIPLIER &&
+        data.BILL_AUDIT_OVERCHARGE_MULTIPLIER >
+          data.BILL_AUDIT_SUGGESTED_MULTIPLIER &&
+        data.BILL_AUDIT_SUGGESTED_MULTIPLIER > 1.0
+      );
+    },
+    {
+      message:
+        "Invalid bill-audit multipliers config: must satisfy UPCODED > OVERCHARGE > SUGGESTED > 1.0",
+      path: ["BILL_AUDIT_UPCODED_MULTIPLIER"],
+    },
+  );
 
 const env = envSchema.safeParse(process.env);
 if (!env.success) {
@@ -146,9 +187,11 @@ if (!env.success) {
   );
   process.exit(1);
 }
- 
+
 if (process.env.NODE_ENV === "production" && !process.env.AGENT_API_KEY) {
-  process.stderr.write("Missing/invalid env: AGENT_API_KEY — required in production\n");
+  process.stderr.write(
+    "Missing/invalid env: AGENT_API_KEY — required in production\n",
+  );
   process.exit(1);
 }
 
@@ -160,7 +203,9 @@ if (env.data.STELLAR_NETWORK === "public" && !env.data.OZ_FACILITATOR_API_KEY) {
 }
 
 if (env.data.STELLAR_NETWORK !== "public" && !env.data.OZ_FACILITATOR_API_KEY) {
-  logger.warn("OZ_FACILITATOR_API_KEY not set — x402 routes will fail until configured");
+  logger.warn(
+    "OZ_FACILITATOR_API_KEY not set — x402 routes will fail until configured",
+  );
 }
 
 // Multi-pharmacy mode requires PHARMACY_2_PUBLIC_KEY (#195)
@@ -184,11 +229,22 @@ const llm = new OpenAI({ apiKey: env.data.LLM_API_KEY, baseURL: LLM_BASE_URL });
 const agentKeypair = Keypair.fromSecret(env.data.AGENT_SECRET_KEY);
 
 // --- Per-run tool call cap (issue #90) ---
-const MAX_TOOL_CALLS_PER_RUN = parseInt(process.env.MAX_TOOL_CALLS_PER_RUN || "30", 10);
+const MAX_TOOL_CALLS_PER_RUN = parseInt(
+  process.env.MAX_TOOL_CALLS_PER_RUN || "30",
+  10,
+);
 let toolCallCapHitsTotal = 0;
 
 // --- Per-run iteration cap (default 15) ---
-const MAX_AGENT_ITERATIONS = Math.max(1, parseInt(process.env.MAX_AGENT_ITERATIONS || process.env.AGENT_MAX_ITERATIONS || "15", 10) || 15);
+const MAX_AGENT_ITERATIONS = Math.max(
+  1,
+  parseInt(
+    process.env.MAX_AGENT_ITERATIONS ||
+      process.env.AGENT_MAX_ITERATIONS ||
+      "15",
+    10,
+  ) || 15,
+);
 
 // --- Mutable profile (issue #79) ---
 const _DEFAULT_PROFILE = {
@@ -207,7 +263,10 @@ const _DEFAULT_PROFILE = {
   },
 };
 let _profileData = {
-  recipient: { ..._DEFAULT_PROFILE.recipient, medications: [..._DEFAULT_PROFILE.recipient.medications] },
+  recipient: {
+    ..._DEFAULT_PROFILE.recipient,
+    medications: [..._DEFAULT_PROFILE.recipient.medications],
+  },
   caregiver: { ..._DEFAULT_PROFILE.caregiver },
 };
 
@@ -222,13 +281,20 @@ const sentry = await initSentry({ service: "careguard-server" });
 app.use(sentry.requestHandler());
 applySecurityMiddleware(app);
 app.use(createCorsMiddleware());
-const _smallJson = express.json({ limit: process.env.JSON_BODY_LIMIT ?? "20kb" });
-const _largeJson = express.json({ limit: process.env.BILL_AUDIT_BODY_LIMIT ?? "256kb" });
+const _smallJson = express.json({
+  limit: process.env.JSON_BODY_LIMIT ?? "20kb",
+});
+const _largeJson = express.json({
+  limit: process.env.BILL_AUDIT_BODY_LIMIT ?? "256kb",
+});
 app.use((req, res, next) =>
-  (req.path.startsWith("/bill/audit") ? _largeJson : _smallJson)(req, res, next)
+  (req.path.startsWith("/bill/audit") ? _largeJson : _smallJson)(
+    req,
+    res,
+    next,
+  ),
 );
-app.use(requestContextMiddleware());
-app.use(requestLoggerMiddleware());
+app.use(requestLifecycleMiddleware());
 app.use("/agent", requireApiKey);
 app.use("/agent/audit", auditRouter);
 
@@ -305,15 +371,23 @@ app.get("/ready", async (_req, res) => {
   const checks: Record<string, boolean | string> = {};
 
   // 1. Required env vars
-  const requiredEnv = ["LLM_API_KEY", "AGENT_SECRET_KEY", "MPP_SECRET_KEY", "CAREGIVER_TOKEN"];
+  const requiredEnv = [
+    "LLM_API_KEY",
+    "AGENT_SECRET_KEY",
+    "MPP_SECRET_KEY",
+    "CAREGIVER_TOKEN",
+  ];
   const missingEnv = requiredEnv.filter((k) => !process.env[k]);
-  checks.env = missingEnv.length === 0 ? true : `missing: ${missingEnv.join(", ")}`;
+  checks.env =
+    missingEnv.length === 0 ? true : `missing: ${missingEnv.join(", ")}`;
 
   // 2. Horizon ping
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 1500);
-    const resp = await fetch("https://horizon-testnet.stellar.org", { signal: controller.signal });
+    const resp = await fetch("https://horizon-testnet.stellar.org", {
+      signal: controller.signal,
+    });
     clearTimeout(timeout);
     checks.horizon = resp.ok || resp.status < 500;
   } catch {
@@ -321,27 +395,38 @@ app.get("/ready", async (_req, res) => {
   }
 
   // 3. OZ facilitator reachability (set by middleware on successful payment verification)
-  checks.ozFacilitator = ozFacilitatorReachable || !env.data.OZ_FACILITATOR_API_KEY
-    ? true
-    : "not yet verified";
+  checks.ozFacilitator =
+    ozFacilitatorReachable || !env.data.OZ_FACILITATOR_API_KEY
+      ? true
+      : "not yet verified";
 
   const allOk = Object.values(checks).every((v) => v === true);
-  res.status(allOk ? 200 : 503).json({ status: allOk ? "ok" : "degraded", checks });
+  res
+    .status(allOk ? 200 : 503)
+    .json({ status: allOk ? "ok" : "degraded", checks });
 });
 
 // --- Profile (issue #79) ---
-app.get("/agent/profile", (_req, res) => { res.json(_profileData); });
+app.get("/agent/profile", (_req, res) => {
+  res.json(_profileData);
+});
 
 app.patch("/agent/profile", (req, res) => {
   const { recipient, caregiver } = req.body ?? {};
   if (recipient && typeof recipient === "object") {
     _profileData.recipient = { ..._profileData.recipient, ...recipient };
+    if (recipient.name) {
+      registerKnownNames([recipient.name]);
+    }
     if (Array.isArray(recipient.medications)) {
       _profileData.recipient.medications = recipient.medications;
     }
   }
   if (caregiver && typeof caregiver === "object") {
     _profileData.caregiver = { ..._profileData.caregiver, ...caregiver };
+    if (caregiver.name) {
+      registerKnownNames([caregiver.name]);
+    }
   }
   res.json(_profileData);
 });
@@ -350,31 +435,21 @@ app.patch("/agent/profile", (req, res) => {
 // PHARMACY PRICE API (was port 3001)
 // ============================================================
 
-const PHARMACY_ADMIN_TOKEN = process.env.PHARMACY_ADMIN_TOKEN || CAREGIVER_TOKEN;
+const PHARMACY_ADMIN_TOKEN =
+  process.env.PHARMACY_ADMIN_TOKEN || CAREGIVER_TOKEN;
 const pharmacyStore = createPharmacyPricingStore();
 const recipientsStore = createCareRecipientsStore();
 
-function requirePharmacyAdmin(
-  req: express.Request,
-  res: express.Response,
-  next: express.NextFunction,
-) {
-  const auth = req.headers.authorization;
-  if (!auth?.startsWith("Bearer ")) {
-    res
-      .status(401)
-      .setHeader("WWW-Authenticate", "Bearer")
-      .json({ error: "Missing admin token" });
-    return;
-  }
-
-  if (auth.slice("Bearer ".length) !== PHARMACY_ADMIN_TOKEN) {
-    res.status(403).json({ error: "Invalid admin token" });
-    return;
-  }
-
-  next();
+// Register default names and database names on server startup
+registerKnownNames([_profileData.recipient.name, _profileData.caregiver.name]);
+try {
+  const dbRecipients = recipientsStore.list();
+  registerKnownNames(dbRecipients.map((r) => r.name));
+} catch (e) {
+  // Ignore errors if DB is empty or not seeded yet
 }
+
+const requirePharmacyAdmin = createPharmacyAdminAuth(PHARMACY_ADMIN_TOKEN);
 
 app.get("/pharmacy/drugs", (_req, res) => {
   const drugs = pharmacyStore.listDrugs();
@@ -414,7 +489,9 @@ app.put("/pharmacy/drugs/:drugName", requirePharmacyAdmin, (req, res) => {
     return;
   }
 
-  res.json({ drug: pharmacyStore.upsertDrug(parsedBody.data as DrugRecordInput) });
+  res.json({
+    drug: pharmacyStore.upsertDrug(parsedBody.data as DrugRecordInput),
+  });
 });
 
 app.delete("/pharmacy/drugs/:drugName", requirePharmacyAdmin, (req, res) => {
@@ -439,7 +516,9 @@ app.post("/pharmacy/pharmacies", requirePharmacyAdmin, (req, res) => {
   }
 
   res.status(201).json({
-    pharmacy: pharmacyStore.upsertPharmacy(parsedBody.data as PharmacyRecordInput),
+    pharmacy: pharmacyStore.upsertPharmacy(
+      parsedBody.data as PharmacyRecordInput,
+    ),
   });
 });
 
@@ -530,53 +609,64 @@ applyX402Middleware(
   },
 );
 
-app.get("/pharmacy/compare", perRouteLimiters.pharmacyCompare, concurrentRequestsMiddleware("pharmacy_compare"), (req, res) => {
-  const parsedQuery = PharmacyCompareQuerySchema.safeParse({
-    drug: req.query.drug,
-    dosage: req.query.dosage,
-    zip: req.query.zip,
-  });
-  if (!parsedQuery.success) {
-    res.status(400).json({
-      error:
-        parsedQuery.error.issues[0]?.message ??
-        "Invalid pharmacy query parameters",
+app.get(
+  "/pharmacy/compare",
+  perRouteLimiters.pharmacyCompare,
+  concurrentRequestsMiddleware("pharmacy_compare"),
+  (req, res) => {
+    const parsedQuery = PharmacyCompareQuerySchema.safeParse({
+      drug: req.query.drug,
+      dosage: req.query.dosage,
+      zip: req.query.zip,
     });
-    return;
-  }
+    if (!parsedQuery.success) {
+      res.status(400).json({
+        error:
+          parsedQuery.error.issues[0]?.message ??
+          "Invalid pharmacy query parameters",
+      });
+      return;
+    }
 
-  const query = parsedQuery.data as PharmacyCompareQuery;
-  const drug = query.drug.trim().toLowerCase();
-  const dosage = resolveRequestedDosage(drug, query.dosage);
+    const query = parsedQuery.data as PharmacyCompareQuery;
+    const drug = query.drug.trim().toLowerCase();
+    const dosage = resolveRequestedDosage(drug, query.dosage);
 
-  try {
-    const { prices, usedZipCode, isFallbackZip } = getPharmacyPrices(drug, query.zip);
-    res.json(
-      buildCompareResponse({
+    try {
+      const { prices, usedZipCode, isFallbackZip } = getPharmacyPrices(
         drug,
-        dosage,
-        zip: query.zip,
-        usedZipCode,
-        isFallbackZip,
-        payTo: env.data.PHARMACY_1_PUBLIC_KEY,
-        network: NETWORK,
-        prices,
-      }),
-    );
-  } catch (error) {
-    pharmacyUnknownDrugTotal.inc({ drug });
-    res.status(404).json({ ok: false, reason: "NO_PRICES_FOUND" });
-  }
-});
+        query.zip,
+      );
+      res.json(
+        buildCompareResponse({
+          drug,
+          dosage,
+          zip: query.zip,
+          usedZipCode,
+          isFallbackZip,
+          payTo: env.data.PHARMACY_1_PUBLIC_KEY,
+          network: NETWORK,
+          prices,
+        }),
+      );
+    } catch (error) {
+      pharmacyUnknownDrugTotal.inc({ drug });
+      res.status(404).json({ ok: false, reason: "NO_PRICES_FOUND" });
+    }
+  },
+);
 
 // ============================================================
 // BILL AUDIT API (was port 3002)
 // ============================================================
 
 app.get("/bill/sample", (req, res) => {
-  const rid = typeof req.query.recipientId === 'string' ? req.query.recipientId : 'rosa_garcia';
+  const rid =
+    typeof req.query.recipientId === "string"
+      ? req.query.recipientId
+      : "rosa_garcia";
   const recipient = recipientsStore.getById(rid);
-  const patientName = recipient?.name ?? 'Rosa Garcia';
+  const patientName = recipient?.name ?? "Rosa Garcia";
   res.json({
     patientName,
     facilityName: "General Hospital",
@@ -647,12 +737,17 @@ app.get("/bill/sample", (req, res) => {
 });
 
 // Reject oversized bill audit requests BEFORE x402 payment is charged (issue #13)
-const BILL_AUDIT_MAX_ITEMS = parseInt(process.env.BILL_AUDIT_MAX_ITEMS || "500", 10);
+const BILL_AUDIT_MAX_ITEMS = parseInt(
+  process.env.BILL_AUDIT_MAX_ITEMS || "500",
+  10,
+);
 app.post("/bill/audit", (req, res, next) => {
   const items = req.body?.lineItems;
   if (Array.isArray(items) && items.length > BILL_AUDIT_MAX_ITEMS) {
     billAuditOversizedRejectionsTotal.inc();
-    res.status(400).json({ error: `lineItems exceeds max (${BILL_AUDIT_MAX_ITEMS})` });
+    res
+      .status(400)
+      .json({ error: `lineItems exceeds max (${BILL_AUDIT_MAX_ITEMS})` });
     return;
   }
   next();
@@ -671,29 +766,39 @@ applyX402Middleware(app, {
   },
 });
 
-app.post("/bill/audit", perRouteLimiters.billAudit, concurrentRequestsMiddleware("bill_audit"), (req, res) => {
-  try {
-    const validatedBody = validateBillAuditRequest(req.body);
-    const sanitizedLineItems = validatedBody.lineItems.map((lineItem) => ({
-      ...lineItem,
-      description: sanitizeUserString(lineItem.description),
-    }));
-    res.json(auditBill(sanitizedLineItems, { network: NETWORK, payTo: process.env.BILL_PROVIDER_PUBLIC_KEY }));
-  } catch (error) {
-    if (error instanceof BillAuditValidationError) {
-      const validationError = error as BillAuditValidationError;
-      res.status(400).json({
-        ok: false,
-        reason: validationError.code,
-        message: validationError.message,
-        issues: validationError.issues,
-      });
-      return;
-    }
+app.post(
+  "/bill/audit",
+  perRouteLimiters.billAudit,
+  concurrentRequestsMiddleware("bill_audit"),
+  (req, res) => {
+    try {
+      const validatedBody = validateBillAuditRequest(req.body);
+      const sanitizedLineItems = validatedBody.lineItems.map((lineItem) => ({
+        ...lineItem,
+        description: sanitizeUserString(lineItem.description),
+      }));
+      res.json(
+        auditBill(sanitizedLineItems, {
+          network: NETWORK,
+          payTo: process.env.BILL_PROVIDER_PUBLIC_KEY,
+        }),
+      );
+    } catch (error) {
+      if (error instanceof BillAuditValidationError) {
+        const validationError = error as BillAuditValidationError;
+        res.status(400).json({
+          ok: false,
+          reason: validationError.code,
+          message: validationError.message,
+          issues: validationError.issues,
+        });
+        return;
+      }
 
-    res.status(400).json({ ok: false, reason: "INVALID_REQUEST_BODY" });
-  }
-});
+      res.status(400).json({ ok: false, reason: "INVALID_REQUEST_BODY" });
+    }
+  },
+);
 
 // ============================================================
 // DRUG INTERACTION API (was port 3003)
@@ -714,34 +819,40 @@ applyX402Middleware(app, {
   },
 });
 
-app.get("/drug/interactions", perRouteLimiters.drugInteractions, concurrentRequestsMiddleware("drug_interactions"), (req, res) => {
-  const parsedQuery = DrugInteractionsQuerySchema.safeParse({
-    meds: req.query.meds,
-  });
-  if (!parsedQuery.success) {
-    res.status(400).json({
-      error:
-        parsedQuery.error.issues[0]?.message ??
-        "Invalid meds query parameter",
+app.get(
+  "/drug/interactions",
+  perRouteLimiters.drugInteractions,
+  concurrentRequestsMiddleware("drug_interactions"),
+  (req, res) => {
+    const parsedQuery = DrugInteractionsQuerySchema.safeParse({
+      meds: req.query.meds,
     });
-    return;
-  }
+    if (!parsedQuery.success) {
+      res.status(400).json({
+        error:
+          parsedQuery.error.issues[0]?.message ??
+          "Invalid meds query parameter",
+      });
+      return;
+    }
 
-  const result = checkDrugInteractionsInService(
-    (parsedQuery.data as DrugInteractionsQuery).medications,
-  );
-  res.json({
-    checkTimestamp: new Date().toISOString(),
-    protocol: { name: "x402", network: NETWORK, price: "$0.001" },
-    ...result,
-  });
-});
+    const result = checkDrugInteractionsInService(
+      (parsedQuery.data as DrugInteractionsQuery).medications,
+    );
+    res.json({
+      checkTimestamp: new Date().toISOString(),
+      protocol: { name: "x402", network: NETWORK, price: "$0.001" },
+      ...result,
+    });
+  },
+);
 
 // ============================================================
 // MPP PHARMACY PAYMENT (was port 3005)
 // ============================================================
 
-const DATA_DIR = process.env.DATA_DIR || fileURLToPath(new URL("./data", import.meta.url));
+const DATA_DIR =
+  process.env.DATA_DIR || fileURLToPath(new URL("./data", import.meta.url));
 const ORDERS_FILE = `${DATA_DIR}/orders.json`;
 const MPP_STORE_FILE = `${DATA_DIR}/mpp-store.json`;
 if (!existsSync(DATA_DIR)) mkdirSync(DATA_DIR, { recursive: true });
@@ -777,14 +888,18 @@ async function saveOrder(order: any): Promise<void> {
     renameSync(tempFile, ORDERS_FILE);
   } catch (err: any) {
     if (err?.code === "ELOCKED") {
-      const e = new Error("Order storage temporarily unavailable — lock timeout. Please retry.");
+      const e = new Error(
+        "Order storage temporarily unavailable — lock timeout. Please retry.",
+      );
       (e as any).status = 503;
       throw e;
     }
     throw err;
   } finally {
     if (release) {
-      try { await release(); } catch {}
+      try {
+        await release();
+      } catch {}
     }
   }
 }
@@ -808,72 +923,77 @@ app.get("/pharmacy/orders", (_req, res) => {
   res.json({ orders: loadOrders() });
 });
 
-app.post("/pharmacy/order", perRouteLimiters.pharmacyOrder, concurrentRequestsMiddleware("pharmacy_order"), async (req, res) => {
-  const parsedOrder = MedicationOrderSchema.safeParse(req.body);
-  if (!parsedOrder.success) {
-    res.status(400).json({
-      error: "Invalid order request",
-      details: parsedOrder.error.issues.map((issue) => issue.message),
-    });
-    return;
-  }
-
-  const parsedOrderData = parsedOrder.data as MedicationOrderInput;
-  const safeDrug = sanitizeUserString(parsedOrderData.drug);
-  const safePharmacy = sanitizeUserString(parsedOrderData.pharmacy);
-  const headers = new Headers();
-  for (const [key, value] of Object.entries(req.headers)) {
-    if (value == null) continue;
-    if (Array.isArray(value)) {
-      for (const e of value) headers.append(key, e);
-    } else {
-      headers.set(key, value);
-    }
-  }
-  const webReq = new Request(`http://localhost:${PORT}${req.url}`, {
-    method: req.method,
-    headers,
-  });
-  const result = await mppx.charge({
-    amount: parsedOrderData.amount.toFixed(2),
-    description: `Medication: ${safeDrug} from ${safePharmacy}`,
-  })(webReq);
-  if (result.status === 402) {
-    result.challenge.headers.forEach((v: string, k: string) =>
-      res.setHeader(k, v),
-    );
-    res.status(402).send(await result.challenge.text());
-    return;
-  }
-  const order = {
-    id: `order-${Date.now()}`,
-    drug: safeDrug,
-    pharmacy: safePharmacy,
-    amount: parsedOrderData.amount,
-    status: "confirmed",
-    timestamp: new Date().toISOString(),
-    network: NETWORK,
-    protocol: "MPP Charge",
-  };
-  try {
-    await saveOrder(order);
-  } catch (err: any) {
-    if (err?.status === 503) {
-      res.status(503).json({ error: err.message });
+app.post(
+  "/pharmacy/order",
+  perRouteLimiters.pharmacyOrder,
+  concurrentRequestsMiddleware("pharmacy_order"),
+  async (req, res) => {
+    const parsedOrder = MedicationOrderSchema.safeParse(req.body);
+    if (!parsedOrder.success) {
+      res.status(400).json({
+        error: "Invalid order request",
+        details: parsedOrder.error.issues.map((issue) => issue.message),
+      });
       return;
     }
-    throw err;
-  }
-  const response = result.withReceipt(
-    Response.json({
-      success: true,
-      order,
-      message: `Payment settled. ${safeDrug} from ${safePharmacy} confirmed.`,
-    }),
-  );
-  response.headers.forEach((v: string, k: string) => res.setHeader(k, v));
-  res.status(response.status).json(await response.json());
-});
+
+    const parsedOrderData = parsedOrder.data as MedicationOrderInput;
+    const safeDrug = sanitizeUserString(parsedOrderData.drug);
+    const safePharmacy = sanitizeUserString(parsedOrderData.pharmacy);
+    const headers = new Headers();
+    for (const [key, value] of Object.entries(req.headers)) {
+      if (value == null) continue;
+      if (Array.isArray(value)) {
+        for (const e of value) headers.append(key, e);
+      } else {
+        headers.set(key, value);
+      }
+    }
+    const webReq = new Request(`http://localhost:${PORT}${req.url}`, {
+      method: req.method,
+      headers,
+    });
+    const result = await mppx.charge({
+      amount: parsedOrderData.amount.toFixed(2),
+      description: `Medication: ${safeDrug} from ${safePharmacy}`,
+    })(webReq);
+    if (result.status === 402) {
+      result.challenge.headers.forEach((v: string, k: string) =>
+        res.setHeader(k, v),
+      );
+      res.status(402).send(await result.challenge.text());
+      return;
+    }
+    const order = {
+      id: `order-${Date.now()}`,
+      drug: safeDrug,
+      pharmacy: safePharmacy,
+      amount: parsedOrderData.amount,
+      status: "confirmed",
+      timestamp: new Date().toISOString(),
+      network: NETWORK,
+      protocol: "MPP Charge",
+    };
+    try {
+      await saveOrder(order);
+    } catch (err: any) {
+      if (err?.status === 503) {
+        res.status(503).json({ error: err.message });
+        return;
+      }
+      throw err;
+    }
+    const response = result.withReceipt(
+      Response.json({
+        success: true,
+        order,
+        message: `Payment settled. ${safeDrug} from ${safePharmacy} confirmed.`,
+      }),
+    );
+    response.headers.forEach((v: string, k: string) => res.setHeader(k, v));
+    res.status(response.status).json(await response.json());
+  },
+);
 
 // ============================================================
 // CARE RECIPIENTS API
@@ -897,7 +1017,11 @@ app.post("/agent/pause", (req, res) => {
   const reason: PauseReason =
     raw === "low-balance-usdc" || raw === "low-balance-xlm" ? raw : "manual";
   const state = pauseAgent(reason);
-  appendAuditEntry({ event: "agent.paused", actor: "api", details: { reason } });
+  appendAuditEntry({
+    event: "agent.paused",
+    actor: "api",
+    details: { reason },
+  });
   res.json(state);
 });
 app.post("/agent/resume", (_req, res) => {
@@ -914,30 +1038,20 @@ app.get("/agent/spending", (_req, res) => {
   res.json(getSpendingSummary());
 });
 app.get("/agent/transactions", (req, res) => {
-  const limit = parseInt(req.query.limit as string) || 25;
-  const offset = parseInt(req.query.offset as string) || 0;
   const tracker = getSpendingTracker();
-  const totalTransactions = tracker.transactions.length;
-  const paginatedTransactions = tracker.transactions
-    .slice(-offset - limit, -offset || undefined)
-    .reverse();
-
-  res.json({
-    ...tracker,
-    transactions: paginatedTransactions,
-    pagination: {
-      total: totalTransactions,
-      limit,
-      offset,
-      hasMore: offset + limit < totalTransactions,
-      hasPrevious: offset > 0,
-    },
-  });
+  const { transactions, pagination } = paginateTransactions(
+    tracker.transactions,
+    req.query.limit,
+    req.query.offset,
+  );
+  res.json({ ...tracker, transactions, pagination });
 });
 app.post("/agent/policy", (req, res) => {
   const result = SpendingPolicySchema.safeParse(req.body);
   if (!result.success) {
-    return res.status(400).json({ error: "Invalid policy", issues: result.error.issues });
+    return res
+      .status(400)
+      .json({ error: "Invalid policy", issues: result.error.issues });
   }
   setSpendingPolicy(result.data);
   appendAuditEntry({
@@ -950,6 +1064,18 @@ app.post("/agent/policy", (req, res) => {
     },
   });
   res.json({ success: true, policy: result.data });
+});
+// #1237: manual vitals logging, charted alongside medication adherence.
+app.use("/agent", createVitalsRouter(createVitalsStore()));
+// #1238: preview a policy change against recent payment history.
+app.post("/agent/policy/preview", (req, res) => {
+  const result = SpendingPolicySchema.safeParse(req.body);
+  if (!result.success) {
+    return res
+      .status(400)
+      .json({ error: "Invalid policy", issues: result.error.issues });
+  }
+  res.json({ impact: previewSpendingPolicy(result.data) });
 });
 app.post("/agent/reset", (req, res) => {
   resetSpendingTracker();
@@ -964,39 +1090,128 @@ app.post("/agent/reset", (req, res) => {
   res.json({ success: true });
 });
 
-app.post("/agent/run", perRouteLimiters.agentRun, concurrentRequestsMiddleware("agent_run"), async (req, res) => {
-  const validation = validateTask(req.body?.task);
-  if (!validation.ok) {
-    res.status(400).json({ error: validation.error });
-    return;
-  }
-  if (isPaused()) {
-    const state = getAgentState();
-    res.status(409).json({ error: "Agent is paused", ...state });
-    return;
-  }
-  const task = validation.task!;
-  logger.info({ task, suspicious: validation.suspicious }, "agent task received");
-  try {
-    const result = await agentQueue.enqueue(() => runAgent({
-      task,
-      profile: _profileData,
-      llm,
-      model: LLM_MODEL,
-      maxIterations: MAX_AGENT_ITERATIONS,
-      maxToolCallsPerRun: MAX_TOOL_CALLS_PER_RUN,
-      piiScrub: _piiScrub,
-    }));
-    agentRunsTotal.inc({ status: "success" });
-    logger.info({ toolCalls: result.toolCalls.length, truncated: result.truncated }, "agent task complete");
-    res.json(result);
-  } catch (err: any) {
-    if (err.status === 429) {
-      res.status(429).set("Retry-After", String(err.retryAfter)).json({ error: err.message });
+app.post(
+  "/agent/run",
+  perRouteLimiters.agentRun,
+  concurrentRequestsMiddleware("agent_run"),
+  async (req, res) => {
+    const validation = validateTask(req.body?.task);
+    if (!validation.ok) {
+      res.status(400).json({ error: validation.error });
       return;
     }
-    agentRunsTotal.inc({ status: "error" });
-    res.status(500).json({ error: err.message });
+    if (isPaused()) {
+      const state = getAgentState();
+      res.status(409).json({ error: "Agent is paused", ...state });
+      return;
+    }
+    const task = validation.task!;
+    logger.info(
+      { task, suspicious: validation.suspicious },
+      "agent task received",
+    );
+    try {
+      const result = await agentQueue.enqueue(
+        () =>
+          runAgent({
+            task,
+            profile: _profileData,
+            llm,
+            model: LLM_MODEL,
+            maxIterations: MAX_AGENT_ITERATIONS,
+            maxToolCallsPerRun: MAX_TOOL_CALLS_PER_RUN,
+            piiScrub: _piiScrub,
+          }),
+        (queueWaitMs) => {
+          res.setHeader("Server-Timing", `agent-queue;dur=${queueWaitMs.toFixed(2)}`);
+        },
+      );
+      agentRunsTotal.inc({ status: "success" });
+      logger.info(
+        { toolCalls: result.toolCalls.length, truncated: result.truncated },
+        "agent task complete",
+      );
+      res.json(result);
+    } catch (err: any) {
+      if (err.status === 429) {
+        res
+          .status(429)
+          .set("Retry-After", String(err.retryAfter))
+          .json({ error: err.message });
+        return;
+      }
+      agentRunsTotal.inc({ status: "error" });
+      res.status(500).json({ error: err.message });
+    }
+  },
+);
+
+// --- Allergies endpoints (#1230) ---
+app.get("/agent/allergies", (req, res) => {
+  const recipientId = (req.query.recipient_id as string) || (req.query.recipientId as string) || "rosa";
+  res.json({ allergies: loadRecipientAllergies(recipientId), recipientId });
+});
+
+app.post("/agent/allergies", (req, res) => {
+  const recipientId = (req.query.recipient_id as string) || (req.body.recipientId as string) || "rosa";
+  const { substance, severity, reaction, notes } = req.body ?? {};
+  if (!substance || !severity) {
+    return res.status(400).json({ error: "substance and severity are required" });
+  }
+  const created = addRecipientAllergy({ substance, severity, reaction, notes }, recipientId);
+  res.status(201).json(created);
+});
+
+app.delete("/agent/allergies/:id", (req, res) => {
+  const recipientId = (req.query.recipient_id as string) || "rosa";
+  const success = removeRecipientAllergy(req.params.id, recipientId);
+  res.json({ success });
+});
+
+// --- Co-Caregiver Presence endpoints (#1231) ---
+app.get("/agent/presence", (req, res) => {
+  const recipientId = (req.query.recipient_id as string) || (req.query.recipientId as string) || "rosa";
+  res.json({ presence: loadPresenceMap(recipientId), recipientId });
+});
+
+app.post("/agent/presence/view", (req, res) => {
+  const { itemId, itemType, caregiverId, caregiverName, avatar, recipientId } = req.body ?? {};
+  if (!itemId || !itemType || !caregiverId || !caregiverName) {
+    return res.status(400).json({ error: "itemId, itemType, caregiverId, and caregiverName are required" });
+  }
+  const entry = recordItemView({
+    itemId,
+    itemType,
+    caregiverId,
+    caregiverName,
+    avatar,
+    recipientId,
+  });
+  res.json({ success: true, entry });
+});
+
+// --- Bill OCR endpoint (#1229) ---
+app.post("/bill/ocr", async (req, res) => {
+  const { image } = req.body ?? {};
+  if (!image || typeof image !== "string") {
+    return res.status(400).json({ error: "image (base64) is required" });
+  }
+  try {
+    const result = await extractLineItemsFromBillImage(image);
+    res.json(result);
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || "OCR extraction failed" });
+  }
+});
+
+// --- Price watch endpoint (#1236) ---
+app.post("/agent/price-watch/run", async (req, res) => {
+  const recipientId = (req.query.recipient_id as string) || "rosa";
+  try {
+    const result = await runPriceWatchForRecipient(recipientId);
+    res.json(result);
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || "Price watch failed" });
   }
 });
 
@@ -1007,12 +1222,21 @@ app.post("/agent/run", perRouteLimiters.agentRun, concurrentRequestsMiddleware("
 const horizonServer = new Horizon.Server("https://horizon-testnet.stellar.org");
 
 // 413 handler — must be before Sentry so Sentry also captures it
-app.use((err: any, _req: express.Request, res: express.Response, next: express.NextFunction) => {
-  if (err.type === "entity.too.large") {
-    return res.status(413).json({ error: "Request body too large", limit: err.limit });
-  }
-  next(err);
-});
+app.use(
+  (
+    err: any,
+    _req: express.Request,
+    res: express.Response,
+    next: express.NextFunction,
+  ) => {
+    if (err.type === "entity.too.large") {
+      return res
+        .status(413)
+        .json({ error: "Request body too large", limit: err.limit });
+    }
+    next(err);
+  },
+);
 
 // Sentry error handler must be registered AFTER all routes
 app.use(sentry.errorHandler());
@@ -1028,15 +1252,22 @@ async function startWalletBalanceScheduler(): Promise<void> {
   try {
     cron = await import("node-cron");
   } catch {
-    logger.warn("wallet scheduler enabled but node-cron not installed — falling back to setInterval(15m)");
+    logger.warn(
+      "wallet scheduler enabled but node-cron not installed — falling back to setInterval(15m)",
+    );
     setInterval(() => {
-      checkWalletBalance().then((r) => logger.info({ result: formatResult(r) }, "wallet check"));
+      checkWalletBalance().then((r) =>
+        logger.info({ result: formatResult(r) }, "wallet check"),
+      );
     }, 15 * 60_000);
     return;
   }
 
   if (!cron.validate?.(cronExpr)) {
-    logger.warn({ cronExpr }, "invalid WALLET_BALANCE_CHECK_CRON, falling back to */15 * * * *");
+    logger.warn(
+      { cronExpr },
+      "invalid WALLET_BALANCE_CHECK_CRON, falling back to */15 * * * *",
+    );
   }
   const expr = cron.validate?.(cronExpr) ? cronExpr : "*/15 * * * *";
 
@@ -1045,8 +1276,41 @@ async function startWalletBalanceScheduler(): Promise<void> {
     logger.info({ result: formatResult(r) }, "wallet check");
   });
 
-  checkWalletBalance().then((r) => logger.info({ result: formatResult(r) }, "wallet check startup"));
+  checkWalletBalance().then((r) =>
+    logger.info({ result: formatResult(r) }, "wallet check startup"),
+  );
   logger.info({ expr }, "wallet balance scheduler armed");
+}
+
+async function startPriceWatchScheduler(): Promise<void> {
+  if (process.env.PRICE_WATCH_ENABLED === "0") return;
+  const cronExpr = process.env.PRICE_WATCH_CRON || "0 8 * * *";
+
+  let cron: any;
+  try {
+    cron = await import("node-cron");
+  } catch {
+    logger.warn(
+      "price-watch scheduler enabled but node-cron not installed — falling back to setInterval(24h)",
+    );
+    setInterval(() => {
+      runPriceWatchForRecipient("rosa").catch((err) =>
+        logger.warn({ err: err?.message }, "[price-watch] error in interval run"),
+      );
+    }, 24 * 60 * 60_000);
+    return;
+  }
+
+  const expr = cron.validate?.(cronExpr) ? cronExpr : "0 8 * * *";
+  cron.schedule(expr, async () => {
+    try {
+      await runPriceWatchForRecipient("rosa");
+    } catch (err: any) {
+      logger.warn({ err: err?.message }, "[price-watch] error in scheduled run");
+    }
+  });
+
+  logger.info({ expr }, "medication price-watch scheduler armed");
 }
 
 export async function bootAccountCheck(
@@ -1055,18 +1319,27 @@ export async function bootAccountCheck(
   timeoutMs: number = 10000,
 ): Promise<{ success: boolean; usdcBalance: string }> {
   try {
-    const accountPromise = serverInstance.loadAccount(publicKey);
+    const fetchPromise = fetchWalletBalances(
+      publicKey,
+      STELLAR_CONFIG.horizonUrl,
+      env.data.USDC_ISSUER || "",
+    );
     const timeoutPromise = new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error("Horizon loadAccount timeout (10s)")), timeoutMs),
+      setTimeout(
+        () => reject(new Error("Horizon loadAccount timeout (10s)")),
+        timeoutMs,
+      ),
     );
 
-    const acc: any = await Promise.race([accountPromise, timeoutPromise]);
-    const usdc = acc.balances.find((b: any) => b.asset_code === "USDC");
-    const usdcBalance = usdc?.balance || "0";
+    const balances = await Promise.race([fetchPromise, timeoutPromise]);
+    const usdcBalance = balances.usdc.toFixed(2);
     isDegradedMode = false;
     return { success: true, usdcBalance };
   } catch (err: any) {
-    logger.error({ err: err.message }, "CRITICAL: Horizon loadAccount failed or timed out during boot — continuing in degraded mode");
+    logger.error(
+      { err: err.message },
+      "CRITICAL: Horizon loadAccount failed or timed out during boot — continuing in degraded mode",
+    );
     isDegradedMode = true;
     return { success: false, usdcBalance: "unable to check" };
   }
@@ -1075,20 +1348,26 @@ export async function bootAccountCheck(
 if (import.meta.url === `file://${process.argv[1]}`) {
   const server = app.listen(PORT, async () => {
     const { usdcBalance } = await bootAccountCheck();
-    logger.info({ port: PORT, network: NETWORK, llm: LLM_MODEL, wallet: agentKeypair.publicKey(), usdc: usdcBalance, degraded: isDegradedMode, availableDrugs: getAvailableDrugs() }, "CareGuard Unified Server started");
+    logger.info(
+      {
+        port: PORT,
+        network: NETWORK,
+        llm: LLM_MODEL,
+        wallet: agentKeypair.publicKey(),
+        usdc: usdcBalance,
+        degraded: isDegradedMode,
+        availableDrugs: getAvailableDrugs(),
+      },
+      "CareGuard Unified Server started",
+    );
     await startWalletBalanceScheduler();
+    await startPriceWatchScheduler();
   });
 
-  process.on("SIGTERM", () => {
-    logger.info("SIGTERM received. Draining server...");
-    isDraining = true;
-    server.close(() => {
-      logger.info("Server closed. Exiting process.");
-      process.exit(0);
-    });
-    setTimeout(() => {
-      logger.error("Graceful shutdown timeout. Forcing exit.");
-      process.exit(1);
-    }, 30000);
+  gracefulShutdown({
+    server,
+    onDrainStart: () => {
+      isDraining = true;
+    },
   });
 }

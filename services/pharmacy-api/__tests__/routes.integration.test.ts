@@ -460,7 +460,10 @@ describe("GET /pharmacy/compare", () => {
     const { app } = makeApp();
     const res = await request(app).get("/pharmacy/compare").query({ drug: "unknowndrug", zip: "90210" });
     expect(res.status).toBe(404);
-    expect(res.body).toEqual({ ok: false, reason: "NO_PRICES_FOUND" });
+    expect(res.body).toEqual({
+      error: "No pricing records found for drug: unknowndrug",
+      code: "NOT_FOUND_DRUG"
+    });
   });
 
   it("returns 200 with ranked prices and correct cheapest entry", async () => {

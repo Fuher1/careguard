@@ -1,9 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdirSync } from "fs";
 
 vi.hoisted(() => {
   process.env.MOCK_NETWORK = "1";
   process.env.NODE_ENV = "test";
-  process.env.AGENT_SECRET_KEY = "test-agent-secret";
+  process.env.AGENT_SECRET_KEY = "S-test-agent-secret";
 });
 
 vi.mock("@stellar/stellar-sdk", () => ({
@@ -51,6 +52,9 @@ const POLICY = {
 
 describe("MOCK_NETWORK tool paths", () => {
   beforeEach(() => {
+    // tests/setup.ts wipes DATA_DIR after every test; recreate the recipient
+    // dir tools.ts otherwise only creates once at module load.
+    mkdirSync(`${process.env.DATA_DIR}/recipients/rosa`, { recursive: true });
     resetSpendingTracker();
     setSpendingPolicy(POLICY);
   });

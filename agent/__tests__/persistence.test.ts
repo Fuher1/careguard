@@ -113,16 +113,19 @@ vi.mock("../../shared/audit-log.ts", () => ({
 vi.mock("../../shared/notifications.ts", () => ({ notify: vi.fn().mockResolvedValue(undefined) }));
 // Spying directly on the real pino instance is unreliable, so mock the
 // logger module the same way shared/__tests__/request-logger.test.ts does.
-const warnSpy = vi.hoisted(() => vi.fn());
+const { warnSpy, errorSpy } = vi.hoisted(() => ({ warnSpy: vi.fn(), errorSpy: vi.fn() }));
 vi.mock("../../shared/logger.ts", () => ({
-  logger: { info: vi.fn(), warn: warnSpy, error: vi.fn(), debug: vi.fn() },
+  logger: { info: vi.fn(), warn: warnSpy, error: errorSpy, debug: vi.fn() },
 }));
 
 import { describe, it, expect, beforeEach } from "vitest";
 
 // Mirrors the DATA_DIR computation in agent/tools.ts so the fake fs paths
 // we seed/inspect line up regardless of where the repo is checked out.
-const DATA_DIR = new URL("../../data", import.meta.url).pathname;
+// tools.ts's getDataDir() checks process.env.DATA_DIR first — tests/setup.ts
+// always sets it to a worker-specific temp dir, so that must take priority
+// here too, or every fsState lookup misses the key tools.ts actually wrote.
+const DATA_DIR = process.env.DATA_DIR || new URL("../../data", import.meta.url).pathname;
 
 function freshTracker(transactionCount: number) {
   return {
@@ -146,6 +149,7 @@ beforeEach(() => {
   fsState.files.clear();
   fsState.readOnlyPaths.clear();
   warnSpy.mockClear();
+  errorSpy.mockClear();
 });
 
 describe("Spending tracker persistence across restart (#44)", () => {
@@ -202,8 +206,19 @@ describe("Corrupted data falls back to defaults without throwing (#44)", () => {
       result = tools.loadSpending("corrupt-recipient");
     }).not.toThrow();
 
-    expect(result).toEqual({ medications: 0, bills: 0, serviceFees: 0, transactions: [] });
-    expect(warnSpy).toHaveBeenCalled();
+    expect(result).toEqual({
+      medications: 0,
+      bills: 0,
+      serviceFees: 0,
+      transactions: [],
+      monthTotals: {
+        yearMonth: expect.any(String),
+        medications: 0,
+        bills: 0,
+        serviceFees: 0,
+      },
+    });
+    expect(errorSpy).toHaveBeenCalled();
   });
 
   it("a corrupt policy.json on disk does not throw and yields the default policy", async () => {

@@ -10,34 +10,38 @@
  *   UTC day.
  */
 
-const { MOCK_HINT } = vi.hoisted(() => {
+const { MOCK_HINT, mockFiles } = vi.hoisted(() => {
   process.env.AGENT_SECRET_KEY = "SBWWZYCAFDDJXNRRMKSFNRB6OTVZHTCMPUCVZ4FBZLSPHFKHYLPRTJCD";
   process.env.MOCK_NETWORK = "1";
   // Global env is UTC to clearly distinguish it from the per-policy Phoenix tz
   process.env.SPENDING_TIMEZONE = "UTC";
-  return { MOCK_HINT: Buffer.from([0xca, 0xfe, 0xba, 0xbe]) };
+  return { MOCK_HINT: Buffer.from([0xca, 0xfe, 0xba, 0xbe]), mockFiles: new Map<string, string>() };
 });
 
 vi.mock("dotenv/config", () => ({}));
+// A real in-memory fs, not just spending-file-shaped stubs: loadPolicy() reads
+// policy.json via existsSync/readFileSync too, and setSpendingPolicy() writes
+// it via writeFileSync — a mock that only understands spending*.json makes
+// existsSync(policyFile) always false, so the Phoenix timezone this test sets
+// via setSpendingPolicy() is silently dropped and checkSpendingPolicy() always
+// falls back to the default (timezone-less) policy.
 vi.mock("fs", () => ({
-  readFileSync: vi.fn((filePath: string) => {
-    const key = String(filePath);
-    if (key.includes("spending.snapshot.json")) {
-      return JSON.stringify({ medications: 0, bills: 0, serviceFees: 0, transactions: [], _snapshotTxCount: 0 });
-    }
-    if (key.includes("spending.json")) {
-      return JSON.stringify({ medications: 0, bills: 0, serviceFees: 0, transactions: [] });
-    }
-    return "{}";
+  readFileSync: vi.fn((filePath: string) => mockFiles.get(String(filePath)) ?? "{}"),
+  writeFileSync: vi.fn((filePath: string, data: string) => {
+    mockFiles.set(String(filePath), String(data));
   }),
-  writeFileSync: vi.fn(),
-  appendFileSync: vi.fn(),
-  existsSync: vi.fn((filePath: string) => {
-    const key = String(filePath);
-    return key.includes("spending.snapshot.json") || key.includes("spending.json");
+  appendFileSync: vi.fn((filePath: string, data: string) => {
+    mockFiles.set(String(filePath), (mockFiles.get(String(filePath)) ?? "") + String(data));
   }),
+  existsSync: vi.fn((filePath: string) => mockFiles.has(String(filePath))),
   mkdirSync: vi.fn(),
-  renameSync: vi.fn(),
+  renameSync: vi.fn((from: string, to: string) => {
+    const data = mockFiles.get(String(from));
+    if (data !== undefined) {
+      mockFiles.set(String(to), data);
+      mockFiles.delete(String(from));
+    }
+  }),
 }));
 vi.mock("@stellar/stellar-sdk", () => ({
   Keypair: {
@@ -108,20 +112,21 @@ describe("Per-policy timezone daily-limit check (Issue #207)", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2024-01-14T22:00:00.000Z")); // 3 pm Phoenix Jan 14
 
-    const tracker = tools.loadSpending("rosa");
-    // Inject the 11pm Phoenix transaction directly into the in-memory tracker
-    tracker.transactions = [
-      {
-        id: "tx-phoenix-11pm",
-        timestamp: phoenixElevenPm,
-        type: "medication" as const,
-        description: "Late-night medication",
-        amount: 40,
-        recipient: "pharm-1",
-        status: "completed" as const,
-        category: TRANSACTION_CATEGORY.MEDICATIONS,
-      },
-    ] as any;
+    // getSpendingTracker()'s shallow copy keeps the same .transactions array
+    // reference as the live module-internal tracker checkSpendingPolicy reads
+    // from — loadSpending() reads a disconnected fresh-from-disk copy, so
+    // mutating it has no effect on the state under test.
+    const tracker = tools.getSpendingTracker();
+    tracker.transactions.push({
+      id: "tx-phoenix-11pm",
+      timestamp: phoenixElevenPm,
+      type: "medication" as const,
+      description: "Late-night medication",
+      amount: 40,
+      recipient: "pharm-1",
+      status: "completed" as const,
+      category: TRANSACTION_CATEGORY.MEDICATIONS,
+    } as any);
 
     // Set a policy with Phoenix timezone, daily limit $100, meds budget $300
     tools.setSpendingPolicy({
@@ -153,19 +158,17 @@ describe("Per-policy timezone daily-limit check (Issue #207)", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2024-01-14T22:00:00.000Z"));
 
-    const tracker = tools.loadSpending("rosa");
-    tracker.transactions = [
-      {
-        id: "tx-phoenix-11pm-utc",
-        timestamp: phoenixElevenPm,
-        type: "medication" as const,
-        description: "Late-night medication",
-        amount: 40,
-        recipient: "pharm-1",
-        status: "completed" as const,
-        category: TRANSACTION_CATEGORY.MEDICATIONS,
-      },
-    ] as any;
+    const tracker = tools.getSpendingTracker();
+    tracker.transactions.push({
+      id: "tx-phoenix-11pm-utc",
+      timestamp: phoenixElevenPm,
+      type: "medication" as const,
+      description: "Late-night medication",
+      amount: 40,
+      recipient: "pharm-1",
+      status: "completed" as const,
+      category: TRANSACTION_CATEGORY.MEDICATIONS,
+    } as any);
 
     // Policy WITHOUT timezone → falls back to SPENDING_TIMEZONE=UTC
     tools.setSpendingPolicy({

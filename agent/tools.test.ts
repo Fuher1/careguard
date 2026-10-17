@@ -4,11 +4,10 @@ import {
   setSpendingPolicy,
   getSpendingTracker,
   resetSpendingTracker,
-  getPharmacyPrices,
+  comparePharmacyPrices,
   fetchRosaBill,
 } from './tools';
 import { TRANSACTION_CATEGORY } from '../shared/types';
-import * as x402fetch from '@x402/fetch';
 
 // Mock getLocalDayBounds from tz.ts so we can control time boundaries
 import * as tz from './tz';
@@ -20,15 +19,23 @@ vi.mock('./tz', async (importOriginal) => {
   };
 });
 
-// Mock network responses
+// getX402Fetch()/extractX402TxHash() are local to tools.ts, not exports of
+// @x402/fetch — so the live (non-mock-network) path is controlled here the
+// same way agent/__tests__/tools-x402.test.ts does: stub wrapFetchWithPayment
+// to hand back one fixed mock fetch function.
+const { x402FetchMock } = vi.hoisted(() => ({ x402FetchMock: vi.fn() }));
 vi.mock('@x402/fetch', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@x402/fetch')>();
   return {
     ...actual,
-    getX402Fetch: vi.fn(),
-    extractX402TxHash: vi.fn(() => 'mock-hash'),
+    wrapFetchWithPayment: vi.fn().mockReturnValue(x402FetchMock),
+    x402Client: vi.fn().mockReturnValue({ register: vi.fn().mockReturnThis() }),
   };
 });
+vi.mock('@x402/stellar', () => ({
+  createEd25519Signer: vi.fn().mockReturnValue({}),
+  ExactStellarScheme: vi.fn(),
+}));
 
 describe('Spending Policy Engine', () => {
   beforeEach(() => {
@@ -54,7 +61,7 @@ describe('Spending Policy Engine', () => {
       dailyLimit: 100,
       approvalThreshold: 50,
     });
-    const tracker = getSpendingTracker('test-recipient');
+    const tracker = getSpendingTracker();
     tracker.medications = 50;
 
     const result = checkSpendingPolicy(30, TRANSACTION_CATEGORY.MEDICATIONS);
@@ -70,7 +77,7 @@ describe('Spending Policy Engine', () => {
       dailyLimit: 100,
       approvalThreshold: 50,
     });
-    const tracker = getSpendingTracker('test-recipient');
+    const tracker = getSpendingTracker();
     tracker.medications = 80;
 
     const result = checkSpendingPolicy(30, TRANSACTION_CATEGORY.MEDICATIONS);
@@ -86,7 +93,7 @@ describe('Spending Policy Engine', () => {
       dailyLimit: 100,
       approvalThreshold: 200, // High threshold
     });
-    const tracker = getSpendingTracker('test-recipient');
+    const tracker = getSpendingTracker();
     tracker.medications = 0;
     
     // Add a transaction today for 80
@@ -132,7 +139,7 @@ describe('Spending Policy Engine', () => {
       dayEnd: new Date('2026-01-02T05:00:00.000Z'),
     });
 
-    const tracker = getSpendingTracker('test-recipient');
+    const tracker = getSpendingTracker();
     
     // Transaction just BEFORE the day started in NY (yesterday)
     tracker.transactions.push({
@@ -168,7 +175,7 @@ describe('Spending Policy Engine', () => {
       approvalThreshold: 500,
     });
     
-    const tracker = getSpendingTracker('test-recipient');
+    const tracker = getSpendingTracker();
     // Spent 900 on bills
     tracker.bills = 900;
     
@@ -191,14 +198,13 @@ describe('Safe JSON Parsing (Issue #161)', () => {
   });
 
   it('handles malformed JSON from pharmacy API gracefully', async () => {
-    const mockFetch = vi.fn().mockResolvedValue({
+    x402FetchMock.mockResolvedValue({
       ok: true,
       headers: new Headers({ 'payment-response': 'mock-hash' }),
       json: () => Promise.reject(new SyntaxError('Unexpected end of JSON input')),
     });
-    vi.mocked(x402fetch.getX402Fetch).mockReturnValue(mockFetch);
 
-    const result = await getPharmacyPrices('Lisinopril');
+    const result = await comparePharmacyPrices('Lisinopril');
     expect(result).toEqual({ ok: false, reason: 'MALFORMED_RESPONSE' });
   });
 

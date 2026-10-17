@@ -77,6 +77,11 @@ describe('validatePolicy', () => {
     expect(r.isValid).toBe(true);
   });
 
+  it('accepts default/max holdTimeSeconds of 86400 (Issue #260)', () => {
+    const r = validatePolicy({ ...valid, holdTimeSeconds: 86400 });
+    expect(r.isValid).toBe(true);
+  });
+
   it('rejects approvalThreshold greater than smallest cap', () => {
     const r = validatePolicy({ ...valid, approvalThreshold: 200 });
     expect(r.isValid).toBe(false);

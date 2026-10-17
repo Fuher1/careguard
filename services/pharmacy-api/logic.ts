@@ -4,13 +4,14 @@ import {
   optionalFreeTextSchema,
   zipCodeSchema,
 } from "../../shared/free-text.ts";
+import { DEFAULT_ZIP_CODE } from "../../shared/pharmacy-pricing.ts";
 import { toDisplayName } from "./db.ts";
 
 export const PharmacyCompareQuerySchema = z
   .object({
     drug: freeTextSchema("drug"),
     dosage: optionalFreeTextSchema("dosage"),
-    zip: zipCodeSchema.optional().default("90210"),
+    zip: zipCodeSchema.optional().default(DEFAULT_ZIP_CODE),
   })
   .strict();
 export type PharmacyCompareQuery = z.infer<typeof PharmacyCompareQuerySchema>;

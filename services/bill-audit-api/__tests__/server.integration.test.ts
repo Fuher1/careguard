@@ -60,8 +60,8 @@ describe("POST /bill/audit (Issue #788)", () => {
     const res = await request(app).post("/bill/audit").send({ lineItems: [] });
     expect(res.status).toBeGreaterThanOrEqual(400);
     expect(res.status).toBeLessThan(500);
-    expect(res.body.ok).toBe(false);
-    expect(typeof res.body.reason).toBe("string");
+    expect(res.body.error).toBeDefined();
+    expect(typeof res.body.code).toBe("string");
   });
 
   it("rejects a negative chargedAmount with a structured 4xx", async () => {
@@ -70,7 +70,8 @@ describe("POST /bill/audit (Issue #788)", () => {
       .send({ lineItems: [{ description: "Visit", cptCode: "99213", quantity: 1, chargedAmount: -50 }] });
     expect(res.status).toBeGreaterThanOrEqual(400);
     expect(res.status).toBeLessThan(500);
-    expect(res.body.ok).toBe(false);
+    expect(res.body.error).toBeDefined();
+    expect(res.body.code).toBeDefined();
   });
 
   it("rejects a NaN chargedAmount with a structured 4xx", async () => {
@@ -79,6 +80,8 @@ describe("POST /bill/audit (Issue #788)", () => {
       .send({ lineItems: [{ description: "Visit", cptCode: "99213", quantity: 1, chargedAmount: NaN }] });
     expect(res.status).toBeGreaterThanOrEqual(400);
     expect(res.status).toBeLessThan(500);
+    expect(res.body.error).toBeDefined();
+    expect(res.body.code).toBeDefined();
   });
 
   it("rejects a malformed CPT code with a structured 4xx", async () => {
@@ -87,7 +90,8 @@ describe("POST /bill/audit (Issue #788)", () => {
       .send({ lineItems: [{ description: "Visit", cptCode: "not-a-cpt", quantity: 1, chargedAmount: 50 }] });
     expect(res.status).toBeGreaterThanOrEqual(400);
     expect(res.status).toBeLessThan(500);
-    expect(res.body.ok).toBe(false);
+    expect(res.body.error).toBeDefined();
+    expect(res.body.code).toBeDefined();
   });
 
   it("rejects an oversized lineItems array before processing it", async () => {
@@ -100,6 +104,24 @@ describe("POST /bill/audit (Issue #788)", () => {
     const res = await request(app).post("/bill/audit").send({ lineItems });
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(/exceeds max/);
+    expect(res.body.code).toBe("VALIDATION_ERROR");
+  });
+
+  it("rejects a payload that exceeds the body size limit with a 413 and standardized shape", async () => {
+    const hugeBody = {
+      lineItems: Array.from({ length: 3000 }, () => ({
+        description: "A".repeat(100),
+        cptCode: "99213",
+        quantity: 1,
+        chargedAmount: 50,
+      }))
+    };
+    const res = await request(app).post("/bill/audit").send(hugeBody);
+    expect(res.status).toBe(413);
+    expect(res.body.error).toBe("Request body too large");
+    expect(res.body.code).toBe("BODY_TOO_LARGE");
+    expect(res.body.details).toBeDefined();
+    expect(res.body.details.limit).toBeDefined();
   });
 });
 

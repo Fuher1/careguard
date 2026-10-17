@@ -131,6 +131,9 @@ describe("pharmacy API persistence", () => {
       .query({ drug: "UnknownDrug", zip: "90210" });
 
     expect(response.status).toBe(404);
-    expect(response.body).toEqual({ ok: false, reason: "NO_PRICES_FOUND" });
+    expect(response.body).toEqual({
+      error: "No pricing records found for drug: unknowndrug",
+      code: "NOT_FOUND_DRUG"
+    });
   });
 });

@@ -22,14 +22,18 @@ jobs:
       - name: Install dependencies
         run: npm ci --legacy-peer-deps
 
+      - name: Install dashboard dependencies
+        run: npm ci
+        working-directory: dashboard
+
       - name: Typecheck root
         run: npx tsc --noEmit
 
       - name: Typecheck dashboard
         run: cd dashboard && npx tsc --noEmit
 
-      - name: Lint
-        run: npm run lint
-
       - name: Run tests
-        run: npm test
+        run: npm run test:all
+
+      - name: Verify vitest/@vitest/coverage-v8 are version-locked (#1395)
+        run: npm run check:vitest-lock

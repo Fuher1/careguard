@@ -75,5 +75,5 @@ This long-term split is tracked as a follow-up and is **not** part of this PR. T
 ## Alternatives Considered
 
 - **Single global rate limit with higher ceiling:** Rejected — does not prevent cross-route starvation.
-- **Redis-backed rate limiting:** Preferred for multi-instance deployments. The existing `rate-limit-redis` dependency supports this; enabling it requires setting `REDIS_URL`. Not activated here because the current deployment is single-instance.
+- **Redis-backed rate limiting:** Preferred for multi-instance deployments. The existing `rate-limit-redis` dependency supports this; enabling it requires setting `REDIS_URL`. Not activated here because the current deployment is single-instance. See [redis-down.md](../runbooks/redis-down.md) for what currently degrades (webhook replay protection) when `REDIS_URL` is unset or Redis is unreachable — rate limiting itself is unaffected today since it is not yet Redis-backed.
 - **Worker threads for LLM agent:** Deferred to long-term split.

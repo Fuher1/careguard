@@ -2,6 +2,11 @@ import { render, screen, fireEvent } from '@testing-library/react';
 import { describe, it, expect, vi } from 'vitest';
 import Dashboard from '../app/page';
 
+vi.mock('next/navigation', () => ({
+  usePathname: vi.fn(() => '/'),
+  useSearchParams: vi.fn(() => ({ get: vi.fn(() => null) })),
+}));
+
 // Mock the environment and dependencies
 vi.mock('../../lib/useProfile', () => ({
   useProfile: () => ({

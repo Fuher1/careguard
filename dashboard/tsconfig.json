@@ -1,5 +1,5 @@
 {
-  // TODO: consider enabling noUncheckedIndexedAccess and noImplicitOverride in future ADR
+  // noUncheckedIndexedAccess / noImplicitOverride: deferred, see docs/adr/005-strict-type-checking-flags.md
   "compilerOptions": {
     "target": "ES2017",
     "lib": ["dom", "dom.iterable", "esnext"],

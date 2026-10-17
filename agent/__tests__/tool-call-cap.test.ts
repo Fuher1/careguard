@@ -114,6 +114,7 @@ describe("tool call cap", () => {
     expect(res.status).toBe(200);
     expect(res.body.truncated).toBe(true);
     expect(res.body.toolCalls.length).toBe(3);
+    expect(res.body.events).toContainEqual({ kind: "tool_call_cap_reached" });
   });
 
   it("does not truncate when under cap", async () => {

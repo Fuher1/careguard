@@ -29,7 +29,7 @@ vi.mock("@stellar/stellar-sdk", () => ({
   },
 }));
 
-const { TOOL_DEFINITIONS, validateToolInput } = await import("../tools.ts");
+const { TOOL_DEFINITIONS, validateToolInput, MAX_PAYMENT } = await import("../tools.ts");
 
 describe("tool schema strictness", () => {
   it("sets additionalProperties:false on every object tool schema", () => {
@@ -56,6 +56,16 @@ describe("tool schema strictness", () => {
         unexpected: "ignored-before",
       }),
     ).toThrow(/unknown field\(s\) not allowed: unexpected/);
+  });
+
+  it("documents the same payment max in TOOL_DEFINITIONS as the enforced MAX_PAYMENT (issue #1074)", () => {
+    for (const name of ["pay_for_medication", "pay_bill"]) {
+      const tool = TOOL_DEFINITIONS.find((t) => t.name === name)!;
+      expect(tool.description).toContain(`$0.01 and $${MAX_PAYMENT}`);
+      expect((tool.input_schema.properties as any).amount.description).toContain(
+        `max: ${MAX_PAYMENT}`,
+      );
+    }
   });
 });
 

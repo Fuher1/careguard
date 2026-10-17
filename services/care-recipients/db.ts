@@ -7,7 +7,7 @@ import { logger } from '../../shared/logger.ts';
 const require = createRequire(import.meta.url);
 const { DatabaseSync } = require('node:sqlite') as typeof import('node:sqlite');
 
-export interface CareRecipient {
+export interface CareRecipientEntity {
   id: string;
   name: string;
   age: number | null;
@@ -37,7 +37,7 @@ function defaultDbPath(): string {
   return new URL('../../data/careguard.sqlite', import.meta.url).pathname;
 }
 
-function rowToRecipient(row: CareRecipientRow): CareRecipient {
+function rowToRecipient(row: CareRecipientRow): CareRecipientEntity {
   let medications: string[] = [];
   try {
     medications = JSON.parse(row.medications);
@@ -103,21 +103,21 @@ export class CareRecipientsStore {
     logger.info('[care-recipients] seeded default recipient Rosa Garcia');
   }
 
-  list(): CareRecipient[] {
+  list(): CareRecipientEntity[] {
     const rows = this.db
       .prepare('SELECT * FROM care_recipients ORDER BY name ASC')
       .all() as CareRecipientRow[];
     return rows.map(rowToRecipient);
   }
 
-  getById(id: string): CareRecipient | undefined {
+  getById(id: string): CareRecipientEntity | undefined {
     const row = this.db
       .prepare('SELECT * FROM care_recipients WHERE id = ?')
       .get(id) as CareRecipientRow | undefined;
     return row ? rowToRecipient(row) : undefined;
   }
 
-  create(input: Omit<CareRecipient, 'id'>): CareRecipient {
+  create(input: Omit<CareRecipientEntity, 'id'>): CareRecipientEntity {
     // Date.now() alone collides under concurrent creates of the same name within
     // the same millisecond (duplicate PRIMARY KEY -> insert throws); a short
     // random suffix keeps ids readable while guaranteeing uniqueness.

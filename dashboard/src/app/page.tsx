@@ -2,6 +2,7 @@
 
 import { usePathname, useSearchParams } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { isValidLocale, type Locale } from "../i18n";
 import { DashboardFooter } from "../components/dashboard-footer";
 import { DashboardHeader } from "../components/dashboard-header";
 import { DashboardTabsNav } from "../components/dashboard-tabs-nav";
@@ -55,6 +56,8 @@ export default function Dashboard() {
       : "overview";
   }, [searchParams]);
 
+  const localeParam = searchParams.get("locale");
+  const locale: Locale = isValidLocale(localeParam || "") ? localeParam as Locale : "en";
   const state = useAgentState({ activeTab });
 
   const ariaLogRef = useRef<number | null>(null);
@@ -100,9 +103,10 @@ export default function Dashboard() {
         agentInfoError={state.agentInfoError}
         spendingError={state.spendingError}
         transactionsError={state.transactionsError}
+        recipientsError={recipientsError}
       />
       <div className="max-w-7xl mx-auto px-4 py-6">
-        <DashboardTabsNav activeTab={activeTab} pathname={pathname} />
+        <DashboardTabsNav activeTab={activeTab} pathname={pathname} approvalsCount={state.approvals.length} locale={locale} />
         {activeTab === "overview" && (
           <OverviewTab
             spending={state.spending}
@@ -110,22 +114,34 @@ export default function Dashboard() {
             agentPaused={state.agentPaused}
             loading={state.loading}
             activeTask={state.activeTask}
+            activeTool={state.activeTool}
             onRunTask={state.runAgentTask}
             onCancelTask={state.cancelAgentTask}
             recipient={recipient}
+            locale={locale}
+            locale={DEFAULT_LOCALE}
           />
         )}
         {activeTab === "medications" && (
           <MedicationsTab
             agentResult={state.agentResult}
             recipient={recipient}
+            locale={locale}
           />
         )}
         {activeTab === "bills" && (
           <BillsTab agentResult={state.agentResult} recipient={recipient} />
         )}
         {activeTab === "approvals" && (
-          <ApprovalsTab agentConnected={state.agentConnected} />
+          <ApprovalsTab
+            agentConnected={state.agentConnected}
+            approvals={state.approvals}
+            loading={state.approvalsLoading}
+            onApprove={state.approveTransaction}
+            onCancel={state.cancelTransaction}
+            locale={locale}
+            currentCaregiver={caregiver}
+          />
         )}
         {activeTab === "policy" && (
           <PolicyTab
@@ -157,6 +173,7 @@ export default function Dashboard() {
             agentLog={state.agentLog}
             setAgentLog={state.setAgentLog}
             allTransactions={state.allTransactions}
+            fetchAllTransactions={state.fetchTransactionHistory}
             auditEvents={state.auditEvents}
             pagination={state.pagination}
             currentPage={state.currentPage}
@@ -167,6 +184,7 @@ export default function Dashboard() {
             onResetAgent={state.resetAgent}
             loadingTransactions={state.loadingTransactions}
             loadingSpending={state.loadingSpending}
+            locale={locale}
           />
         )}
         {activeTab === "settings" && (

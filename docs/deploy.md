@@ -14,6 +14,8 @@ This is the production deployment guide for CareGuard.
 
 Deploy the root unified server (`server.ts`) on a Node.js host that supports outbound HTTPS and environment variables.
 
+For Render deployments, see `docs/deployment/render.md` for rollback and deploy guidance.
+
 Required environment variables include:
 
 - `LLM_API_KEY`

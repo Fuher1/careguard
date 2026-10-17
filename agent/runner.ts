@@ -40,6 +40,8 @@ import {
   getAdherenceStatus,
   confirmAdherenceReminder,
   setCurrentRecipient,
+  checkRecipientAllergies,
+  runPriceWatch,
   TOOL_DEFINITIONS,
   validateToolInput,
 } from "./tools.ts";
@@ -70,6 +72,12 @@ export interface RunAgentOptions {
   model: string;
   maxIterations?: number;
   maxToolCallsPerRun?: number;
+  /**
+   * Optional progress sink (#1253): invoked with the tool name right before
+   * each tool executes, so a caller (the server's SSE stream) can surface
+   * which step of a multi-tool-call task is in progress.
+   */
+  onProgress?: (progress: { tool: string; iteration: number }) => void;
   llmToolTemperature?: number;
   llmSummaryTemperature?: number;
   llmMaxTokensToolResult?: number;
@@ -81,7 +89,7 @@ export interface RunAgentOptions {
 
 export interface RunAgentResult {
   response: string;
-  toolCalls: Array<{ tool: string; input: Record<string, unknown>; result: ToolResult }>;
+  toolCalls: Array<{ id: string; tool: string; input: Record<string, unknown>; result: ToolResult }>;
   spending: ReturnType<typeof getSpendingSummary>;
   llmUsage: { promptTokens: number; completionTokens: number };
   truncated: boolean;
@@ -198,6 +206,16 @@ export async function executeTool(name: string, input: Record<string, unknown>):
       case "check_drug_interactions":
         result = await checkDrugInteractions(input.medications as string[]);
         break;
+      case "check_allergies":
+        result = checkRecipientAllergies(input.medications as string[], rid);
+        break;
+      case "run_price_watch":
+        result = await runPriceWatch(
+          rid,
+          input.medications as string[] | undefined,
+          input.zip_code as string | undefined,
+        );
+        break;
       case "fetch_tool_result":
         result = fetchToolResult(
           input.result_id as string,
@@ -295,6 +313,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
     llmMaxTokensSummary = 4096,
     llmContextWindow = 32768,
     piiScrub = true,
+    onProgress,
   } = opts;
 
   const systemPrompt = buildSystemPrompt(profile, profile.caregiver.name);
@@ -311,7 +330,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
     { role: "user", content: userTask },
   ];
 
-  const toolCalls: Array<{ tool: string; input: Record<string, unknown>; result: ToolResult }> = [];
+  const toolCalls: Array<{ id: string; tool: string; input: Record<string, unknown>; result: ToolResult }> = [];
   let finalResponse = "";
   let llmUsage = { promptTokens: 0, completionTokens: 0 };
   let runToolCalls = 0;
@@ -402,6 +421,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
 
     if (runToolCalls + message.tool_calls.length > maxToolCallsPerRun) {
       truncated = true;
+      events.push({ kind: "tool_call_cap_reached" });
       appendAuditEntry({
         event: "agent.tool_cap_exceeded",
         actor: "agent",
@@ -424,14 +444,16 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
 
       logger.info({ tool: fnName, args: JSON.stringify(fnArgs).slice(0, 100) }, "tool call");
 
+      onProgress?.({ tool: fnName, iteration });
+
       let result: ToolResult;
       try {
         result = await executeTool(fnName, fnArgs);
-        toolCalls.push({ tool: fnName, input: fnArgs, result });
+        toolCalls.push({ id: toolCall.id, tool: fnName, input: fnArgs, result });
       } catch (err: any) {
         logger.error({ tool: fnName, err: err.message }, "tool error");
         result = { error: err.message };
-        toolCalls.push({ tool: fnName, input: fnArgs, result });
+        toolCalls.push({ id: toolCall.id, tool: fnName, input: fnArgs, result });
       }
 
       appendAuditEntry({

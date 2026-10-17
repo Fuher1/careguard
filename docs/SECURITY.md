@@ -1,5 +1,11 @@
 # CareGuard Security Model
 
+## Security reference docs
+
+- `docs/security/authn-authz.md` — authentication and authorization model for all externally reachable endpoints
+- `docs/security/threat-model-review.md` — review cadence, ownership, and event triggers
+- `docs/security/disclosure-policy.md` — coordinated disclosure timeline and SLA
+
 ## Threat Model
 
 CareGuard is an autonomous healthcare financial agent that makes real payments on Stellar. The primary adversarial surface is the `/agent/run` endpoint, which accepts free-text tasks from the caregiver dashboard and routes them into an LLM that can call financial tools.
@@ -138,12 +144,27 @@ If a future feature genuinely needs client-side persistence (e.g. a non-sensitiv
 
 ---
 
+## Data Retention
+
+PHI scrubbing above (#97) only covers text sent to the LLM provider — it does
+nothing for data already persisted to disk. See
+[`docs/data/retention.md`](data/retention.md) for retention periods per data
+class (spending, orders, care recipient profile, audit log, application
+logs), the data-subject erasure procedure and its tension with the
+append-only audit chain, what's actually protected at rest today (exposure
+prevention, not encryption), and the relevant HIPAA/GDPR obligations.
+
+---
+
 ## Secret Rotation
 
-See `docs/runbooks/rotate-secrets.md` for step-by-step rotation procedures for every secret (agent wallet, OZ API key, LLM key, MPP key, JWT).
+See `docs/runbooks/rotate-secrets.md` for step-by-step rotation procedures for every secret (agent wallet, OZ API key, LLM key, MPP key, JWT). See [`docs/security/rotation-sla.md`](security/rotation-sla.md) for how often each secret must rotate, the emergency response time after a suspected leak, and who is responsible.
 
 ---
 
 ## Reporting Vulnerabilities
 
 Open a private issue on the repository or contact the maintainers directly. Do not disclose vulnerabilities publicly before a fix is available.
+
+- `docs/security/disclosure-policy.md` — coordinated disclosure policy, timelines, and severity SLAs
+- `docs/security/threat-model-review.md` — review cadence and triggers for security model changes

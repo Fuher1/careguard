@@ -53,3 +53,9 @@ Output indicators of tampering:
 
 3. **Identify & Close Security Gaps**:
    Implement stricter OS-level permissions on the `data/` directory so only the application user process has write access.
+
+---
+
+## Related
+
+- [ADR 008: Append-Only Hash-Chained Audit Log Design](../adr/008-audit-log-hash-chain.md)

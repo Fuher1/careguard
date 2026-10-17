@@ -1,6 +1,19 @@
 import { describe, it, expect, vi } from 'vitest';
 
 // Pre-define environment variables before importing server.ts
+vi.mock("fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("fs")>();
+  return {
+    ...actual,
+    readFileSync: (path: any, options: any) => {
+      if (typeof path === 'string' && path.includes('audit_thresholds.json')) {
+        throw new Error('Mock read failure');
+      }
+      return actual.readFileSync(path, options);
+    },
+  };
+});
+
 vi.hoisted(() => {
   process.env.BILL_PROVIDER_PUBLIC_KEY = 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5';
   process.env.BILL_AUDIT_OVERCHARGE_MULTIPLIER = '2.0';

@@ -79,6 +79,7 @@ process.env.BILL_PROVIDER_PUBLIC_KEY = "GBQTESTBILLPROVIDERPUBKEY";
 process.env.MPP_SECRET_KEY = "test-mpp-secret-key";
 process.env.CAREGIVER_TOKEN = "test-caregiver-token";
 process.env.ALLOWED_ORIGINS = "http://localhost:3000";
+process.env.AGENT_API_KEY = "test-agent-api-key";
 
 const { app } = await import("../../server.ts");
 const auth = (req: any) => req.set("Authorization", "Bearer test-agent-api-key");

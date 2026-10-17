@@ -1,5 +1,5 @@
 import { render, screen, fireEvent } from "@testing-library/react";
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { ActivityTab } from "../components/tabs/activity-tab";
 import type { AgentLogEntry } from "../components/types";
 
@@ -49,6 +49,10 @@ describe("Tool-call error expand/collapse", () => {
     vi.clearAllMocks();
   });
 
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   it("renders normal log entries as plain text without details", () => {
     const entries = [makeNormalEntry()];
     const { container } = render(<ActivityTab {...baseProps} agentLog={entries} />);
@@ -94,6 +98,7 @@ describe("Tool-call error expand/collapse", () => {
   });
 
   it("copies error detail to clipboard when copy button clicked", async () => {
+    vi.stubGlobal("isSecureContext", true);
     Object.assign(navigator, {
       clipboard: {
         writeText: vi.fn().mockResolvedValue(undefined),

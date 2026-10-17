@@ -4,6 +4,14 @@
  * When REDIS_URL is set, uses ioredis to connect to Redis.
  * When REDIS_URL is unset, falls back to an in-process Map-based cache with a
  * warning log. The fallback is not shared across server instances.
+ *
+ * ioredis-mock version relationship (issue #1385): ioredis-mock's major version
+ * is unrelated to ioredis's. This repo uses ioredis ^5 (resolves to 5.x) plus
+ * ioredis-mock ^8 in devDependencies; ioredis-mock 8.x declares ioredis ^5 as a
+ * peer dependency and tracks the ioredis 5.x command surface. The full surface
+ * used here — GET, SET (incl. PX/NX), INCR, DEL — is covered by ioredis-mock
+ * (see shared/__tests__/redis-ioredis-mock.test.ts). When upgrading ioredis to
+ * a new major, upgrade ioredis-mock to the 8.x line that tracks that major.
  */
 
 import Redis from "ioredis";

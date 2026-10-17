@@ -19,7 +19,14 @@ export interface ActivityTabProps {
   recipient: RecipientProfile;
   agentLog: AgentLogEntry[];
   setAgentLog: (entries: AgentLogEntry[]) => void;
+  /**
+   * Transactions for the page currently in view — NOT the full history, despite
+   * the name (useAgentState replaces this array on every page change). Use
+   * fetchAllTransactions when the complete history is needed.
+   */
   allTransactions: Transaction[];
+  /** Fetches the complete transaction history on demand, for the PDF export. */
+  fetchAllTransactions?: () => Promise<Transaction[]>;
   auditEvents?: AuditLogEvent[];
   pagination: PaginationData | null;
   currentPage: number;
@@ -30,6 +37,64 @@ export interface ActivityTabProps {
   onResetAgent: () => void;
   loadingTransactions?: boolean;
   loadingSpending?: boolean;
+  locale?: Locale;
+}
+
+/** Plain-language explanation for each transaction status (#1269). */
+const STATUS_EXPLANATIONS: Record<string, string> = {
+  completed:
+    "The payment went through successfully and was recorded on the Stellar network.",
+  pending:
+    "Waiting to be processed. Held payments count down in the Approvals tab and are approved automatically when the hold time ends unless cancelled.",
+  approved:
+    "Approved and in progress — the payment is being completed on the network.",
+  blocked:
+    "The payment was stopped before any funds moved. This can mean a spending-policy limit was hit, the wallet had insufficient funds, or the network transaction failed.",
+  disputed:
+    "A charge in this transaction is being disputed. See the Bills tab for audit details.",
+  cancelled:
+    "The payment was cancelled before it completed. No funds were sent.",
+  rejected:
+    "The payment was refused and did not go through.",
+};
+
+function statusExplanation(status: string): string {
+  return STATUS_EXPLANATIONS[status] ?? "Current state of this transaction.";
+}
+
+/**
+ * Status badge with a touch-friendly (click/tap, not hover-only) explanation.
+ * Collapsed view keeps the original compact badge; expanding reveals what the
+ * status means, plus the block reason for blocked transactions when present.
+ */
+function StatusBadge({ status, reason }: { status: string; reason?: string }) {
+  const explanation = statusExplanation(status);
+  return (
+    <details className="inline-block text-left group">
+      <summary
+        title={explanation}
+        className="list-none cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-sky-500 rounded"
+      >
+        <span
+          className={`px-2 py-0.5 rounded text-xs ${status === "completed"
+            ? "bg-green-100 text-green-700"
+            : status === "blocked"
+              ? "bg-red-100 text-red-700"
+              : "bg-amber-100 text-amber-700"
+            }`}
+        >
+          {status}
+        </span>
+        <span className="sr-only"> — {explanation}</span>
+      </summary>
+      <div className="mt-1 w-48 rounded-lg border border-slate-200 bg-white p-2 text-xs text-slate-600 shadow-sm">
+        <p>{explanation}</p>
+        {status === "blocked" && reason && (
+          <p className="mt-1 font-medium text-red-600">Reason: {reason}</p>
+        )}
+      </div>
+    </details>
+  );
 }
 
 /** Tags keyed by transaction id. Each tx can have multiple tags. */
@@ -87,6 +152,7 @@ export function ActivityTab({
   agentLog,
   setAgentLog,
   allTransactions,
+  fetchAllTransactions,
   auditEvents = [],
   pagination,
   currentPage,
@@ -95,9 +161,45 @@ export function ActivityTab({
   setPageSize,
   spending,
   onResetAgent,
+  locale = "en",
 }: ActivityTabProps) {
   const [showAllLogEntries, setShowAllLogEntries] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const [preparingReport, setPreparingReport] = useState(false);
+  const t = getTranslations(locale).activity;
+
+  // Reset clears the whole history, so count from pagination when it is known
+  // rather than from the page in view.
+  const totalTransactions = pagination?.total ?? allTransactions.length;
+
+  // The visible page is only part of the history once pagination kicks in, so
+  // "Download Report" pulls every page before building the PDF. When everything
+  // already fits on one page (the common case) no extra request is made.
+  const handleDownloadReport = async () => {
+    const hasUnloadedPages =
+      Boolean(fetchAllTransactions) &&
+      pagination !== null &&
+      pagination.total > allTransactions.length;
+
+    if (!hasUnloadedPages) {
+      downloadTransactionPDF(allTransactions, spending, { recipient });
+      return;
+    }
+
+    setPreparingReport(true);
+    try {
+      const full = await fetchAllTransactions!();
+      downloadTransactionPDF(full.length > 0 ? full : allTransactions, spending, {
+        recipient,
+      });
+    } catch {
+      // Fall back to the visible page rather than leaving the caregiver with
+      // no report at all.
+      downloadTransactionPDF(allTransactions, spending, { recipient });
+    } finally {
+      setPreparingReport(false);
+    }
+  };
 
   // Tags state: { [txId]: string[] }
   const [tagsMap, setTagsMap] = useState<TxTagsMap>({});
@@ -204,9 +306,8 @@ export function ActivityTab({
       <ConfirmDialog
         open={confirmOpen}
         title="Reset all agent data?"
-        description={`This will delete ${allTransactions.length} transaction${
-          allTransactions.length === 1 ? "" : "s"
-        }, the agent log, and all audit results. This cannot be undone.`}
+        description={`This will delete ${totalTransactions} transaction${totalTransactions === 1 ? "" : "s"
+          }, the agent log, and all audit results. This cannot be undone.`}
         confirmLabel="Delete everything"
         cancelLabel="Cancel"
         destructive
@@ -245,35 +346,38 @@ export function ActivityTab({
           )}
           <button
             onClick={() => setAgentLog([])}
+            title={t.clearLogTitle}
             className="text-xs text-amber-500 hover:text-amber-700 hover:underline active:text-amber-800 cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-amber-500 rounded px-1"
           >
             Clear Log
           </button>
+          <span aria-hidden="true" className="h-4 w-px bg-slate-300" />
           <button
             onClick={() => setConfirmOpen(true)}
-            className="text-xs text-red-500 hover:text-red-700 hover:underline active:text-red-800 cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-red-500 rounded px-1"
+            title={t.resetTitle}
+            className="text-xs font-medium text-red-600 border border-red-200 bg-red-50 rounded-md px-2 py-1 hover:bg-red-100 hover:border-red-300 hover:text-red-700 active:bg-red-200 cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-red-500"
           >
-            Reset All
+            {t.reset}
           </button>
         </div>
       </div>
 
       {/* Agent log terminal */}
       <div
-        className="bg-slate-900 rounded-xl p-4 font-mono text-xs text-green-400 max-h-48 overflow-y-auto"
+        className="bg-white rounded-xl border border-slate-200 p-4 text-xs text-slate-700 max-h-48 overflow-y-auto"
         aria-live="polite"
       >
         <div aria-hidden="true">
           {agentLog.length === 0 ? (
-            <span className="text-slate-500">No agent activity yet...</span>
+            <span className="text-slate-400">{t.noActivity}</span>
           ) : (
             <>
               {!showAllLogEntries && agentLog.length > 50 && (
-                <div className="text-slate-400 mb-2">
+                <div className="text-slate-500 mb-2 text-xs">
                   Showing last 50 of {agentLog.length} entries.{" "}
                   <button
                     onClick={() => setShowAllLogEntries(true)}
-                    className="text-sky-400 hover:text-sky-300 underline"
+                    className="text-sky-600 hover:text-sky-700 underline"
                   >
                     Show all
                   </button>
@@ -281,7 +385,7 @@ export function ActivityTab({
               )}
               {(showAllLogEntries ? agentLog : agentLog.slice(-50)).map(
                 (entry) => (
-                  <div key={entry.id}>
+                  <div key={entry.id} className="mb-1 text-slate-700">
                     {entry.errorDetail ? (
                       <details className="group">
                         <summary className="cursor-pointer list-none flex items-center gap-1 hover:text-green-300">
@@ -291,7 +395,7 @@ export function ActivityTab({
                           {entry.message}
                         </summary>
                         <div className="ml-4 mt-1 space-y-1">
-                          <pre className="text-xs text-red-400 whitespace-pre-wrap break-all bg-slate-800 p-2 rounded">
+                          <pre className="text-xs text-red-700 whitespace-pre-wrap break-all bg-red-50 border border-red-200 p-2 rounded">
                             {entry.errorDetail}
                           </pre>
                           <button
@@ -310,7 +414,7 @@ export function ActivityTab({
                                 }
                               }
                             }}
-                            className="text-[10px] text-sky-400 hover:text-sky-300 underline"
+                            className="text-[10px] text-sky-600 hover:text-sky-700 underline"
                           >
                             Copy error
                           </button>
@@ -323,10 +427,10 @@ export function ActivityTab({
                 ),
               )}
               {showAllLogEntries && agentLog.length > 50 && (
-                <div className="text-slate-400 mt-2">
+                <div className="text-slate-500 mt-2 text-xs">
                   <button
                     onClick={() => setShowAllLogEntries(false)}
-                    className="text-sky-400 hover:text-sky-300 underline"
+                    className="text-sky-600 hover:text-sky-700 underline"
                   >
                     Show last 50
                   </button>
@@ -437,8 +541,13 @@ export function ActivityTab({
                     <select
                       value={pageSize}
                       onChange={(e) => {
-                        setPageSize(Number(e.target.value));
-                        setCurrentPage(0);
+                        const nextSize = Number(e.target.value);
+                        setPageSize(nextSize);
+                        // Keep the first visible row in view across the page-size
+                        // change instead of silently jumping back to page 1 (#1283).
+                        setCurrentPage(
+                          Math.floor((currentPage * pageSize) / nextSize),
+                        );
                       }}
                       className="px-2 py-1 text-xs border border-slate-300 rounded bg-white"
                     >
@@ -478,22 +587,22 @@ export function ActivityTab({
                 <thead className="bg-slate-50 border-b border-slate-200">
                   <tr>
                     <th className="hidden md:table-cell text-left px-4 py-2 text-xs font-medium text-slate-500">
-                      Time
+                      {t.time}
                     </th>
                     <th className="text-left px-4 py-2 text-xs font-medium text-slate-500">
-                      Type
+                      {t.type}
                     </th>
                     <th className="text-left px-4 py-2 text-xs font-medium text-slate-500">
-                      Description
+                      {t.description}
                     </th>
                     <th className="text-right px-4 py-2 text-xs font-medium text-slate-500">
-                      Amount
+                      {t.amount}
                     </th>
                     <th className="text-right px-4 py-2 text-xs font-medium text-slate-500">
-                      Status
+                      {t.status}
                     </th>
                     <th className="text-right px-4 py-2 text-xs font-medium text-slate-500">
-                      Stellar Tx
+                      {t.stellarTx}
                     </th>
                     <th className="text-left px-4 py-2 text-xs font-medium text-slate-500">
                       Tags
@@ -510,7 +619,7 @@ export function ActivityTab({
                           className="border-b border-slate-100 last:border-0 bg-slate-50/50"
                         >
                           <td className="hidden md:table-cell px-4 py-2 text-xs text-slate-400">
-                            {new Date(au.timestamp).toLocaleTimeString()}
+                            {formatTime(new Date(au.timestamp), locale)}
                           </td>
                           <td className="px-4 py-2">
                             <span className="px-2 py-0.5 rounded text-xs font-medium bg-slate-800 text-slate-200">
@@ -551,17 +660,16 @@ export function ActivityTab({
                         className="border-b border-slate-100 last:border-0"
                       >
                         <td className="hidden md:table-cell px-4 py-2 text-xs text-slate-400">
-                          {new Date(tx.timestamp).toLocaleTimeString()}
+                          {formatTime(new Date(tx.timestamp), locale)}
                         </td>
                         <td className="px-4 py-2">
                           <span
-                            className={`px-2 py-0.5 rounded text-xs font-medium ${
-                              tx.type === "medication"
-                                ? "bg-blue-100 text-blue-700"
-                                : tx.type === "bill"
-                                  ? "bg-purple-100 text-purple-700"
-                                  : "bg-slate-100 text-slate-600"
-                            }`}
+                            className={`px-2 py-0.5 rounded text-xs font-medium ${tx.type === "medication"
+                              ? "bg-blue-100 text-blue-700"
+                              : tx.type === "bill"
+                                ? "bg-purple-100 text-purple-700"
+                                : "bg-slate-100 text-slate-600"
+                              }`}
                           >
                             {tx.type}
                           </span>
@@ -574,17 +682,13 @@ export function ActivityTab({
                             : tx.amount.toFixed(2)}
                         </td>
                         <td className="px-4 py-2 text-right">
-                          <span
-                            className={`px-2 py-0.5 rounded text-xs ${
-                              tx.status === "completed"
-                                ? "bg-green-100 text-green-700"
-                                : tx.status === "blocked"
-                                  ? "bg-red-100 text-red-700"
-                                  : "bg-amber-100 text-amber-700"
-                            }`}
-                          >
-                            {tx.status}
-                          </span>
+                          <StatusBadge
+                            status={tx.status}
+                            reason={
+                              (tx as { blockedReason?: string }).blockedReason ??
+                              (tx as { blockReason?: string }).blockReason
+                            }
+                          />
                         </td>
                         <td className="px-4 py-2 text-right">
                           <TxLink

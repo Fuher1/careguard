@@ -5,6 +5,7 @@ dist/
 .env.local
 .dev-seed
 *.log
+
 # data/ is a local working directory — PII-sensitive (medication lists, spending patterns, wallet activity)
 data/*
 !data/README.md
@@ -12,5 +13,51 @@ data/*
 !data/.gitkeep
 data/**/*.json
 data/**/*.jsonl
+
+# OS
 .DS_Store
+Thumbs.db
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
 fix.md
+
+# ── Generated / temporary / snapshot files ────────────────────────────────
+# k6 load test results and summaries
+load/results/
+load/*.xml
+load/*.html
+load/*.json
+k6-summary*.json
+k6-results*.json
+
+# Vitest snapshots (auto-generated — committed per project convention only if explicit)
+**/__snapshots__/
+
+# Test temp data directories created during chaos/integration tests
+shared/__tests__/test-data-audit/
+shared/__tests__/test-data-audit-chaos/
+shared/__tests__/test-data-*/
+
+# Generated PDF / dispute letter artefacts from local runs
+*.pdf
+generated/
+services/bill-audit-api/fixtures/generated/
+
+# TypeScript build output and incremental compile cache
+*.tsbuildinfo
+tsconfig.tsbuildinfo
+
+# OS and editor artefacts
+Thumbs.db
+.vscode/*.log
+*.swp
+*.swo
+
+# Heap / CPU profiles generated during load testing
+*.heapprofile
+*.cpuprofile
+*.heapsnapshot

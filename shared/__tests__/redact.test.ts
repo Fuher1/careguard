@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { Keypair } from "@stellar/stellar-sdk";
-import { redact, redactString, redactPII, hashTask } from "../redact.ts";
+import { redact, redactString, redactPII, hashTask, registerKnownNames } from "../redact.ts";
 
 const FAKE_SECRET = Keypair.random().secret(); // 56 chars, S + 55 base32
 
@@ -104,6 +104,28 @@ describe("redactPII", () => {
   it("redacts all occurrences in a long string", () => {
     const input = "Rosa Garcia needs Rosa Garcia's medications";
     const output = redactPII(input);
+    expect(output.match(/\[PATIENT NAME\]/g)?.length).toBe(2);
+  });
+
+  it("does not falsely redact non-name capitalized phrases", () => {
+    const input = "We sent the request to General Hospital in Phoenix Arizona for Dr. Chen";
+    const output = redactPII(input);
+    expect(output).toContain("General Hospital");
+    expect(output).toContain("Phoenix Arizona");
+    expect(output).not.toContain("[PATIENT NAME]");
+  });
+
+  it("redacts dynamically registered patient/caregiver names", () => {
+    const input = "Please coordinate with Alice Vance and Bob Carter";
+    // Before registering, they shouldn't be redacted (since they are not in defaults)
+    let output = redactPII(input);
+    expect(output).toContain("Alice Vance");
+    expect(output).toContain("Bob Carter");
+
+    registerKnownNames(["Alice Vance", "Bob Carter"]);
+    output = redactPII(input);
+    expect(output).not.toContain("Alice Vance");
+    expect(output).not.toContain("Bob Carter");
     expect(output.match(/\[PATIENT NAME\]/g)?.length).toBe(2);
   });
 });

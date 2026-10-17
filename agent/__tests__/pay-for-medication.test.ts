@@ -7,6 +7,9 @@
 const { mockMppFetch, onProgressHolder, mockFiles, MOCK_HINT } = vi.hoisted(() => {
   process.env.AGENT_SECRET_KEY = "SBWWZYCAFDDJXNRRMKSFNRB6OTVZHTCMPUCVZ4FBZLSPHFKHYLPRTJCD";
   process.env.BILL_PROVIDER_PUBLIC_KEY = "GBILLPROVIDER";
+  // Disable mock network so getMppClient() goes through the real
+  // createMppClient() -> Mppx.create() path that mockMppFetch observes.
+  process.env.MOCK_NETWORK = "0";
   const onProgressHolder: { fn?: (event: any) => void } = {};
   return { mockMppFetch: vi.fn(), onProgressHolder, mockFiles: new Map<string, string>(), MOCK_HINT: Buffer.from([0xca, 0xfe, 0xba, 0xbe]) };
 });
@@ -132,7 +135,7 @@ describe("payForMedication — policy-blocked (Issue #35)", () => {
   });
 
   it("returns success:false when daily limit would be exceeded", async () => {
-    setSpendingPolicy("rosa", { ...DEFAULT_POLICY, dailyLimit: 10 });
+    setSpendingPolicy("rosa", { ...DEFAULT_POLICY, dailyLimit: 10, approvalThreshold: 5 });
     const r = await payForMedication("p1", "Pharma", "Drug", 50);
     expect(r.success).toBe(false);
     expect(r.error).toContain("BLOCKED BY SPENDING POLICY");
@@ -315,11 +318,11 @@ describe("checkSpendingPolicy — basic rules (Issue #35)", () => {
   it("blocks medication + bill spending at the global monthly cap", async () => {
     setSpendingPolicy("rosa", {
       ...DEFAULT_POLICY,
-      dailyLimit: 500,
+      dailyLimit: 120,
       monthlyLimit: 120,
       medicationMonthlyBudget: 80,
       billMonthlyBudget: 40,
-      approvalThreshold: 500,
+      approvalThreshold: 120,
     });
     mockMppFetch.mockResolvedValueOnce({
       json: async () => ({ success: true, order: { id: "order-global-cap" } }),

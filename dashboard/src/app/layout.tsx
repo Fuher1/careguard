@@ -1,7 +1,8 @@
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
 import { Toaster } from "@/components/ui/toaster";
-import { fetchProfile } from "../lib/fetchProfile";
+import { fetchProfile } from "../lib/fetch-profile";
+import { DEFAULT_LOCALE, type Locale } from "../i18n";
 
 export async function generateMetadata(): Promise<Metadata> {
   const profile = await fetchProfile();
@@ -57,9 +58,13 @@ export default function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  // #1127 — Derive html lang attribute from active locale.
+  // Intentionally static 'en' until dynamic locale-switcher functionality is implemented.
+  const locale: Locale = DEFAULT_LOCALE;
+
   return (
     <html
-      lang="en"
+      lang={locale}
       className="h-full antialiased"
     >
       <body className="min-h-full flex flex-col bg-slate-50 text-slate-900">

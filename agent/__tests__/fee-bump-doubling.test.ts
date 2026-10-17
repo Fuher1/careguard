@@ -90,7 +90,11 @@ import {
 const MAX_FEE_STROOPS = 100_000; // matches the MAX_FEE_STROOPS default in tools.ts
 const mockAccount = { id: "GPUB123", sequence: "1" };
 const mockServer = { loadAccount: mockLoadAccount, submitTransaction: mockSubmitTransaction } as any;
-const signer = { publicKey: () => "GPUB123", sign: () => {} } as any;
+const signer = {
+  publicKey: () => "GPUB123",
+  sign: () => {},
+  signatureHint: () => MOCK_HINT,
+} as any;
 
 function horizonError(code: string) {
   const err: any = new Error("Request failed with status code 400");

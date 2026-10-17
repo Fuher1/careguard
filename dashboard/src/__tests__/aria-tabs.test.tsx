@@ -2,6 +2,11 @@ import { render, screen, fireEvent } from '@testing-library/react';
 import { describe, it, expect, vi } from 'vitest';
 import Dashboard from '../app/page';
 
+vi.mock('next/navigation', () => ({
+  usePathname: vi.fn(() => '/'),
+  useSearchParams: vi.fn(() => ({ get: vi.fn(() => null) })),
+}));
+
 // Mock the environment and dependencies
 vi.mock('../../lib/useProfile', () => ({
   useProfile: () => ({
@@ -42,7 +47,7 @@ describe('ARIA Tab Semantics and Keyboard Navigation', () => {
     const { container } = render(<Dashboard />);
     
     const tabs = container.querySelectorAll('[role="tab"]');
-    expect(tabs).toHaveLength(7); // overview, medications, bills, policy, wallet, activity, settings
+    expect(tabs).toHaveLength(8); // overview, medications, bills, approvals, policy, wallet, activity, settings
     
     // Check first tab (overview)
     const firstTab = tabs[0];
@@ -62,7 +67,7 @@ describe('ARIA Tab Semantics and Keyboard Navigation', () => {
     const { container } = render(<Dashboard />);
     
     const tabpanels = container.querySelectorAll('[role="tabpanel"]');
-    expect(tabpanels).toHaveLength(7);
+    expect(tabpanels).toHaveLength(8);
     
     // Check active tabpanel
     const activeTabpanel = container.querySelector('#tabpanel-overview');
@@ -107,7 +112,7 @@ describe('ARIA Tab Semantics and Keyboard Navigation', () => {
     
     // End should move to last tab
     fireEvent.keyDown(tablist!, { key: 'End' });
-    expect(tabs[6]).toHaveFocus();
+    expect(tabs[7]).toHaveFocus();
   });
 
   it('should handle Enter and Space keys', () => {

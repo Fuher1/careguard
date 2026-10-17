@@ -1,69 +1,96 @@
 "use client";
 
-import { useState, useEffect } from "react";
-import { Btn } from "../primitives/btn";
-import { Card } from "../primitives/card";
-import type { Transaction } from "../types";
+import { useEffect, useState } from "react";
+import type { Transaction, CaregiverProfile } from "../types";
+import { formatDateTime, type Locale, getTranslations } from "../../i18n";
 import { AGENT_URL } from "../../lib/agent-url";
 import { agentFetch } from "../../lib/agent-fetch";
-
+import type { ItemPresenceMap } from "../../lib/types";
 
 export interface ApprovalsTabProps {
   agentConnected: boolean;
+  approvals: Transaction[];
+  loading: boolean;
+  onApprove: (txId: string) => Promise<void>;
+  onCancel: (txId: string) => Promise<void>;
+  locale?: Locale;
+  currentCaregiver?: CaregiverProfile;
+  linkedCaregivers?: CaregiverProfile[];
 }
 
-export function ApprovalsTab({ agentConnected }: ApprovalsTabProps) {
-  const [approvals, setApprovals] = useState<Transaction[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [, setTick] = useState(0);
+function formatTimeAgo(isoDate: string): string {
+  const diffMs = Date.now() - new Date(isoDate).getTime();
+  const mins = Math.floor(diffMs / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
+}
 
-  const fetchApprovals = async () => {
-    try {
-      const res = await agentFetch(`${AGENT_URL}/agent/pending-approvals`);
-      if (!res.ok) return;
-      const data = await res.json();
-      setApprovals(data.approvals || []);
-    } catch {}
-  };
+export function ApprovalsTab({
+  agentConnected,
+  approvals,
+  loading,
+  onApprove,
+  onCancel,
+  locale = "en",
+  currentCaregiver = { name: "Maria Garcia", relationship: "Primary Caregiver" },
+  linkedCaregivers = [
+    { name: "Maria Garcia", relationship: "Primary Caregiver" },
+    { name: "David Garcia", relationship: "Secondary Caregiver" },
+  ],
+}: ApprovalsTabProps) {
+  const [, setTick] = useState(0);
+  const [presenceMap, setPresenceMap] = useState<ItemPresenceMap>({});
+  const t = getTranslations(locale);
 
   useEffect(() => {
-    fetchApprovals();
-    fetchApprovals();
-    const i = setInterval(fetchApprovals, 5000);
-    const t = setInterval(() => setTick((s) => s + 1), 1000);
-    return () => {
-      clearInterval(i);
-      clearInterval(t);
-    };
+    const timer = setInterval(() => setTick((s) => s + 1), 1000);
+    return () => clearInterval(timer);
   }, []);
 
-  const handleApprove = async (txId: string) => {
-    setLoading(true);
-    try {
-      const res = await agentFetch(`${AGENT_URL}/agent/approvals/${txId}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ approve: true }),
-      });
-      if (res.ok) fetchApprovals();
-    } finally {
-      setLoading(false);
-    }
-  };
+  // Co-caregiver presence tracking (Issue #1231)
+  useEffect(() => {
+    async function trackAndFetchPresence() {
+      // 1. Record view for each approval
+      for (const tx of approvals) {
+        try {
+          await agentFetch(`${AGENT_URL}/agent/presence/view`, {
+            method: "POST",
+            body: JSON.stringify({
+              itemId: tx.id,
+              itemType: "approval",
+              caregiverId: currentCaregiver.name.toLowerCase().replace(/\s+/g, "-"),
+              caregiverName: currentCaregiver.name,
+              recipientId: "rosa",
+            }),
+          });
+        } catch {
+          // Non-blocking ephemeral presence
+        }
+      }
 
-  const handleCancel = async (txId: string) => {
-    setLoading(true);
-    try {
-      const res = await agentFetch(`${AGENT_URL}/agent/approvals/${txId}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ approve: false }),
-      });
-      if (res.ok) fetchApprovals();
-    } finally {
-      setLoading(false);
+      // 2. Fetch active presence map
+      try {
+        const res = await agentFetch(`${AGENT_URL}/agent/presence?recipient_id=rosa`);
+        if (res.ok) {
+          const data = await res.json();
+          if (data.presence) {
+            setPresenceMap(data.presence);
+          }
+        }
+      } catch {
+        // Non-blocking
+      }
     }
-  };
+
+    if (approvals.length > 0) {
+      trackAndFetchPresence();
+    }
+  }, [approvals, currentCaregiver.name]);
+
+  const hasMultipleCaregivers = (linkedCaregivers?.length ?? 0) > 1;
 
   return (
     <div
@@ -74,66 +101,132 @@ export function ApprovalsTab({ agentConnected }: ApprovalsTabProps) {
       className="space-y-6"
     >
       <div className="bg-white rounded-xl border border-slate-200 p-6">
-        <h2 className="text-sm font-semibold text-slate-700 mb-4">
-          Pending Approvals
-        </h2>
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-sm font-semibold text-slate-700">
+            {t.approvals.pending}
+          </h2>
+          {hasMultipleCaregivers && (
+            <span className="text-[11px] text-slate-400">
+              Co-caregivers active: {linkedCaregivers.map((c) => c.name).join(", ")}
+            </span>
+          )}
+        </div>
+
         {!agentConnected && (
           <p className="text-xs text-slate-500">Agent not connected.</p>
         )}
         {agentConnected && approvals.length === 0 && (
-          <p className="text-xs text-slate-500">No pending approvals.</p>
+          <div>
+            <p className="text-xs text-slate-500 mb-2">{t.approvals.noPending}</p>
+            <p className="text-xs text-slate-400">{t.approvals.noPendingReassurance}</p>
+          </div>
         )}
         {approvals.length > 0 && (
           <div className="space-y-3">
-            {approvals.map((tx) => (
-              <div
-                key={tx.id}
-                className="border border-amber-200 bg-amber-50 rounded-lg p-4"
-              >
-                <div className="flex justify-between items-start">
-                  <div>
-                    <div className="text-sm font-medium text-slate-700">
-                      {tx.description}
-                    </div>
-                    <div className="text-xs text-slate-500 mt-1">
-                      Amount: ${tx.amount.toFixed(2)} | Category: {tx.category}
-                    </div>
-                    <div className="text-xs text-slate-400 mt-1">
-                      {new Date(tx.timestamp).toLocaleString()}
-                    </div>
-                    {tx.pendingUntil && (
-                      <div className="text-xs text-amber-600 mt-1">
-                        {(() => {
+            {approvals.map((tx) => {
+              // Find if another caregiver viewed this item
+              const coViewers = hasMultipleCaregivers
+                ? (presenceMap[tx.id] || []).filter(
+                    (e) => e.caregiverName !== currentCaregiver.name,
+                  )
+                : [];
+              const latestCoViewer = coViewers[coViewers.length - 1];
+
+              return (
+                <div
+                  key={tx.id}
+                  className="border border-amber-200 bg-amber-50 rounded-lg p-4"
+                >
+                  <div className="flex justify-between items-start">
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-medium text-slate-700">
+                          {tx.description}
+                        </span>
+                        {/* Co-caregiver presence badge (Issue #1231) */}
+                        {latestCoViewer && (
+                          <span
+                            title={`Viewed by ${latestCoViewer.caregiverName} at ${new Date(
+                              latestCoViewer.lastViewedAt,
+                            ).toLocaleTimeString()}`}
+                            className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-sky-100 text-sky-800 border border-sky-200"
+                          >
+                            <span className="w-1.5 h-1.5 rounded-full bg-sky-500 animate-pulse" />
+                            Viewed by {latestCoViewer.caregiverName}{" "}
+                            {formatTimeAgo(latestCoViewer.lastViewedAt)}
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-xs text-slate-500 mt-1">
+                        Amount: ${tx.amount.toFixed(2)} | Category: {tx.category}
+                      </div>
+                      <div className="text-xs text-slate-400 mt-1">
+                        {formatDateTime(new Date(tx.timestamp), locale)}
+                      </div>
+                      {tx.pendingUntil && (
+                        (() => {
                           try {
                             const ms = new Date(tx.pendingUntil).getTime() - Date.now();
                             const sec = Math.max(0, Math.ceil(ms / 1000));
-                            return `Auto-approve in ${sec}s`;
+                            const announcedSec = sec <= 5 ? sec : Math.ceil(sec / 10) * 10;
+                            const totalTimeMs =
+                              new Date(tx.pendingUntil).getTime() -
+                              new Date(tx.timestamp).getTime();
+                            const elapsedMs = totalTimeMs - ms;
+                            const progressPercent = Math.min(
+                              100,
+                              Math.max(0, (elapsedMs / totalTimeMs) * 100),
+                            );
+
+                            return (
+                              <div className="mt-3">
+                                <div className="flex items-center justify-between mb-1">
+                                  <span className="text-xs text-amber-600 font-medium">
+                                    {sec > 0
+                                      ? t.approvals.autoApproveCountdown.replace(
+                                          "{seconds}",
+                                          String(sec),
+                                        )
+                                      : t.approvals.countdownExpired}
+                                  </span>
+                                </div>
+                                <div className="h-1.5 bg-amber-100 rounded-full overflow-hidden">
+                                  <div
+                                    className="h-full bg-amber-500 transition-all"
+                                    style={{ width: `${progressPercent}%` }}
+                                  />
+                                </div>
+                                <span className="sr-only" aria-live="polite">
+                                  Auto-approve in {announcedSec} seconds
+                                </span>
+                              </div>
+                            );
                           } catch {
                             return null;
                           }
-                        })()}
-                      </div>
-                    )}
-                  </div>
-                  <div className="flex gap-2">
-                    <button
-                      onClick={() => handleApprove(tx.id)}
-                      disabled={loading}
-                      className="px-3 py-1.5 bg-green-600 text-white text-xs font-medium rounded-lg hover:bg-green-700 disabled:opacity-50 cursor-pointer"
-                    >
-                      Approve
-                    </button>
-                    <button
-                      onClick={() => handleCancel(tx.id)}
-                      disabled={loading}
-                      className="px-3 py-1.5 bg-red-600 text-white text-xs font-medium rounded-lg hover:bg-red-700 disabled:opacity-50 cursor-pointer"
-                    >
-                      Cancel
-                    </button>
+                        })()
+                      )}
+                    </div>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => onApprove(tx.id)}
+                        disabled={loading}
+                        className="px-3 py-1.5 bg-green-600 text-white text-xs font-medium rounded-lg hover:bg-green-700 disabled:opacity-50 cursor-pointer"
+                      >
+                        Approve
+                      </button>
+                      <button
+                        onClick={() => onCancel(tx.id)}
+                        disabled={loading}
+                        className="px-3 py-1.5 bg-red-600 text-white text-xs font-medium rounded-lg hover:bg-red-700 disabled:opacity-50 cursor-pointer"
+                      >
+                        Cancel
+                      </button>
+                    </div>
                   </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>

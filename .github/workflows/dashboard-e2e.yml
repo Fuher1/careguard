@@ -7,6 +7,37 @@ on:
       - ".github/workflows/dashboard-e2e.yml"
 
 jobs:
+  # Dashboard unit tests (#1092).
+  #
+  # The e2e job below only lints and runs Playwright, and the root `npm test`
+  # (ci.yml) deliberately excludes dashboard/** from its vitest include globs —
+  # so the dashboard's ~15 vitest suites had zero execution path anywhere in CI.
+  #
+  # The dashboard's vitest config (dashboard/vitest.config.ts) is designed to run
+  # from the repo-root install: it references ../tests/setup.ts and relies on the
+  # root's vitest, @vitejs/plugin-react, jsdom, @testing-library/* and the shared
+  # runtime deps (react, next, sonner, …). So this job installs the root deps and
+  # runs that config directly. Any unit-test failure fails the workflow.
+  unit:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install root deps
+        run: npm ci --legacy-peer-deps
+
+      - name: Run dashboard unit tests (vitest)
+        run: npx vitest run --config dashboard/vitest.config.ts
+
   e2e:
     runs-on: ubuntu-latest
     defaults:

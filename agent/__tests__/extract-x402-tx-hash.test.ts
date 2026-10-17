@@ -28,7 +28,7 @@ vi.mock("@x402/stellar", () => ({ createEd25519Signer: vi.fn(), ExactStellarSche
 vi.mock("@stellar/mpp/charge/client", () => ({ stellar: vi.fn() }));
 vi.mock("mppx/client", () => ({ Mppx: { create: vi.fn() } }));
 
-import { extractX402TxHash } from "../tools.ts";
+import { extractX402TxHash, TX_HASH_EXTRACTION_FAILED } from "../tools.ts";
 
 function makeResponse(headerValue: string | null): Response {
   const headers = new Headers();
@@ -72,16 +72,16 @@ describe("extractX402TxHash", () => {
     expect(result).toBeUndefined();
   });
 
-  it("should return undefined when decoded has no transaction field", () => {
+  it("should return TX_HASH_EXTRACTION_FAILED when decoded has no transaction field", () => {
     mockDecode.mockReturnValue({});
     const result = extractX402TxHash(makeResponse("dGVzdA=="));
-    expect(result).toBeUndefined();
+    expect(result).toBe(TX_HASH_EXTRACTION_FAILED);
   });
 
-  it("should return undefined when decode throws and header is not 64-char hex", () => {
+  it("should return TX_HASH_EXTRACTION_FAILED when decode throws and header is not 64-char hex", () => {
     mockDecode.mockImplementation(() => { throw new Error("decode failed"); });
     const result = extractX402TxHash(makeResponse("short"));
-    expect(result).toBeUndefined();
+    expect(result).toBe(TX_HASH_EXTRACTION_FAILED);
   });
 
   it("should fall back to raw header when decode throws and header is 64-char hex", () => {
@@ -91,21 +91,21 @@ describe("extractX402TxHash", () => {
     expect(result).toBe(hash);
   });
 
-  it("should return undefined for 63-char hex header when decode throws", () => {
+  it("should return TX_HASH_EXTRACTION_FAILED for 63-char hex header when decode throws", () => {
     mockDecode.mockImplementation(() => { throw new Error("decode failed"); });
     const result = extractX402TxHash(makeResponse("a".repeat(63)));
-    expect(result).toBeUndefined();
+    expect(result).toBe(TX_HASH_EXTRACTION_FAILED);
   });
 
-  it("should return undefined for 65-char hex header when decode throws", () => {
+  it("should return TX_HASH_EXTRACTION_FAILED for 65-char hex header when decode throws", () => {
     mockDecode.mockImplementation(() => { throw new Error("decode failed"); });
     const result = extractX402TxHash(makeResponse("a".repeat(65)));
-    expect(result).toBeUndefined();
+    expect(result).toBe(TX_HASH_EXTRACTION_FAILED);
   });
 
-  it("should return undefined on malformed base64 in decode", () => {
+  it("should return TX_HASH_EXTRACTION_FAILED on malformed base64 in decode", () => {
     mockDecode.mockImplementation(() => { throw new Error("malformed base64"); });
     const result = extractX402TxHash(makeResponse("!!!invalid-base64!!!"));
-    expect(result).toBeUndefined();
+    expect(result).toBe(TX_HASH_EXTRACTION_FAILED);
   });
 });

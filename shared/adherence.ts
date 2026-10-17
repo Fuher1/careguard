@@ -90,14 +90,34 @@ export function getFlaggedAdherences(recipientId: string): AdherenceRecord[] {
   );
 }
 
-export function getAdherenceSummary(recipientId: string) {
-  const records = readAdherenceRecords().filter((r) => r.recipientId === recipientId);
-  const total = records.length;
-  const confirmed = records.filter((r) => r.status === "confirmed").length;
-  const skipped = records.filter((r) => r.status === "skipped").length;
-  const pending = records.filter((r) => r.status === "pending").length;
-  const flagged = records.filter((r) => r.status === "flagged").length;
-  const pendingNow = getPendingAdherences(recipientId);
+export function summarizeAdherenceRecords(
+  records: readonly AdherenceRecord[],
+  recipientId: string,
+  now: Date = new Date(),
+) {
+  let total = 0;
+  let confirmed = 0;
+  let skipped = 0;
+  let pending = 0;
+  let flagged = 0;
+  const pendingNow: AdherenceRecord[] = [];
+  const flaggedRecords: AdherenceRecord[] = [];
+
+  for (const record of records) {
+    if (record.recipientId !== recipientId) continue;
+    total++;
+    if (record.status === "confirmed") confirmed++;
+    if (record.status === "skipped") skipped++;
+    if (record.status === "pending") {
+      pending++;
+      if (new Date(record.dueDate) <= now) pendingNow.push(record);
+    }
+    if (record.status === "flagged") {
+      flagged++;
+      flaggedRecords.push(record);
+    }
+  }
+
   return {
     total,
     confirmed,
@@ -105,8 +125,45 @@ export function getAdherenceSummary(recipientId: string) {
     pending,
     flagged,
     pendingNow,
+    flaggedRecords,
     adherenceRate: total > 0 ? Math.round((confirmed / total) * 100) : 100,
   };
+}
+
+export function getAdherenceSummary(recipientId: string) {
+  return summarizeAdherenceRecords(readAdherenceRecords(), recipientId);
+}
+
+export interface AdherenceTimelineEvent {
+  id: string;
+  drug: string;
+  /** When the dose was confirmed/skipped, or when it falls due if still pending. */
+  date: string;
+  status: AdherenceRecord["status"];
+}
+
+/**
+ * Dated adherence events for one recipient, oldest first, so the dashboard can
+ * plot them as markers alongside logged vitals (#1237).
+ */
+export function adherenceTimeline(
+  records: readonly AdherenceRecord[],
+  recipientId: string,
+): AdherenceTimelineEvent[] {
+  return records
+    .filter((r) => r.recipientId === recipientId)
+    .map((r) => ({
+      id: r.id,
+      drug: r.drug,
+      date: r.status === "pending" ? r.dueDate : r.confirmedAt ?? r.dueDate,
+      status: r.status,
+    }))
+    .filter((e) => Number.isFinite(new Date(e.date).getTime()))
+    .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+}
+
+export function getAdherenceTimeline(recipientId: string) {
+  return adherenceTimeline(readAdherenceRecords(), recipientId);
 }
 
 function rewriteAdherenceFile(records: AdherenceRecord[]) {

@@ -4,6 +4,9 @@
 
 const { mppCreateSpy, MOCK_HINT } = vi.hoisted(() => {
   process.env.AGENT_SECRET_KEY = "SBWWZYCAFDDJXNRRMKSFNRB6OTVZHTCMPUCVZ4FBZLSPHFKHYLPRTJCD";
+  // Disable mock network so getMppClient() goes through the real
+  // createMppClient() -> Mppx.create() path that mppCreateSpy observes.
+  process.env.MOCK_NETWORK = "0";
   const MOCK_HINT = Buffer.from([0xca, 0xfe, 0xba, 0xbe]);
   const mppCreateSpy = vi.fn().mockReturnValue({ fetch: vi.fn() });
   return { mppCreateSpy, MOCK_HINT };

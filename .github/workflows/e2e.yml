@@ -47,7 +47,7 @@ jobs:
         working-directory: dashboard
 
       - name: Install Playwright chromium
-        run: pnpm --dir dashboard playwright install --with-deps chromium
+        run: pnpm --dir dashboard exec playwright install --with-deps chromium
 
       - name: Build dashboard
         run: npm run build

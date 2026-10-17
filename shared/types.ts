@@ -121,6 +121,42 @@ export const SpendingPolicySchema = z.object({
 
 export type SpendingPolicy = z.infer<typeof SpendingPolicySchema>;
 
+// ── Allergies & Adverse Reactions (Issue #1230) ────────────────────────────────
+
+export const AllergySeveritySchema = z.enum([
+  'mild',
+  'moderate',
+  'severe',
+  'life_threatening',
+]);
+
+export type AllergySeverity = z.infer<typeof AllergySeveritySchema>;
+
+export const RecipientAllergySchema = z.object({
+  id: z.string().min(1),
+  substance: z.string().min(1),
+  severity: AllergySeveritySchema,
+  reaction: z.string().optional(),
+  notes: z.string().optional(),
+  createdAt: z.string().min(1),
+  updatedAt: z.string().optional(),
+});
+
+export type RecipientAllergy = z.infer<typeof RecipientAllergySchema>;
+
+// ── Co-Caregiver Presence (Issue #1231) ───────────────────────────────────────
+
+export const ItemPresenceEntrySchema = z.object({
+  caregiverId: z.string().min(1),
+  caregiverName: z.string().min(1),
+  avatar: z.string().optional(),
+  lastViewedAt: z.string().min(1),
+});
+
+export type ItemPresenceEntry = z.infer<typeof ItemPresenceEntrySchema>;
+
+export type ItemPresenceMap = Record<string, ItemPresenceEntry[]>;
+
 // A confirmed Stellar transaction hash is always 64 lowercase/uppercase hex chars.
 export const STELLAR_TX_HASH_RE = /^[0-9a-f]{64}$/i;
 

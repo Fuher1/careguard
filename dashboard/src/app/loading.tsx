@@ -1,4 +1,5 @@
 import { Skeleton } from "../components/ui/skeleton";
+import { DASHBOARD_TABS } from "../components/types";
 
 export default function Loading() {
   return (
@@ -17,7 +18,14 @@ export default function Loading() {
 
       <div className="max-w-7xl mx-auto px-4 py-6">
         <nav className="flex gap-1 mb-6 bg-white rounded-lg p-1 border border-slate-200 w-fit">
-          {["Overview", "Medications", "Bills", "Policy", "Wallet", "Activity", "Settings"].map((tab) => (
+          {/*
+            Derive the skeleton placeholders from DASHBOARD_TABS (the single
+            source of truth for the real nav) so the count/order can never drift
+            from the tab bar that replaces it. A hardcoded array previously
+            omitted 'Approvals', rendering 7 placeholders for an 8-tab nav and
+            causing a layout shift on first paint (#1111).
+          */}
+          {DASHBOARD_TABS.map((tab) => (
             <Skeleton key={tab} className="px-4 py-2 rounded-md w-20" />
           ))}
         </nav>

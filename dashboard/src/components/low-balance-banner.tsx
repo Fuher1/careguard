@@ -25,22 +25,22 @@ export function LowBalanceBanner({ pausedReason, walletBalance, walletXlm, onRes
     <div
       role="alert"
       aria-live="assertive"
-      className="bg-red-600 text-white"
+      className="bg-amber-50 border-b border-amber-200 text-slate-700"
     >
       <div className="max-w-7xl mx-auto px-4 py-3 flex flex-wrap items-center gap-3">
-        <span aria-hidden className="text-lg">🚨</span>
+        <span aria-hidden className="text-lg">💰</span>
         <div className="flex-1 min-w-0">
           <p className="font-semibold text-sm">
-            Agent paused — low {copy.kind} balance.
+            Add funds to resume
           </p>
-          <p className="text-xs text-red-100">
-            USDC: {walletBalance ?? "—"} · XLM: {walletXlm ?? "—"}. {copy.suffix}
+          <p className="text-xs text-slate-600">
+            {copy.kind} balance: {copy.kind === "USDC" ? walletBalance : walletXlm ?? "—"}. {copy.suffix}
           </p>
         </div>
         <button
           type="button"
           onClick={onResume}
-          className="text-sm font-semibold rounded-md bg-white text-red-700 px-3 py-1.5 hover:bg-red-50 active:bg-red-100 transition-colors cursor-pointer"
+          className="text-sm font-semibold rounded-md bg-amber-600 text-white px-3 py-1.5 hover:bg-amber-700 active:bg-amber-800 transition-colors cursor-pointer"
         >
           Resume agent
         </button>

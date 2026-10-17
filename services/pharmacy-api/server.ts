@@ -19,9 +19,9 @@ import { pathToFileURL } from "url";
 import { applyX402Middleware, NETWORK, OZ_FACILITATOR_URL } from "../../shared/x402-middleware.ts";
 import { createCorsMiddleware } from "../../shared/cors.ts";
 import { applySecurityMiddleware } from "../../shared/security-middleware.ts";
+import { createPharmacyAdminAuth } from "../../shared/pharmacy-admin-auth.ts";
 import { logger } from "../../shared/logger.ts";
-import { requestContextMiddleware } from "../../shared/request-context.ts";
-import { requestLoggerMiddleware } from "../../shared/request-logger.ts";
+import { requestLifecycleMiddleware } from "../../shared/request-lifecycle.ts";
 import { pharmacyUnknownDrugTotal } from "../../shared/metrics.ts";
 import type { PharmacyPricingStore } from "./db.ts";
 import { createPharmacyPricingStore } from "./db.ts";
@@ -41,8 +41,10 @@ import type {
   PharmacyRecordInput,
 } from "./logic.ts";
 
-const PORT = parseInt(process.env.PHARMACY_API_PORT || "3001");
+const PORT = parseInt(process.env.PHARMACY_API_PORT || "3001", 10);
 const PAY_TO = process.env.PHARMACY_1_PUBLIC_KEY;
+
+if (!PAY_TO) throw new Error("PHARMACY_1_PUBLIC_KEY required in .env");
 
 export interface PharmacyAppOptions {
   payTo: string;
@@ -51,33 +53,8 @@ export interface PharmacyAppOptions {
   enablePayments?: boolean;
 }
 
-function createAdminMiddleware(adminToken?: string) {
-  return (req: express.Request, res: express.Response, next: express.NextFunction) => {
-    if (!adminToken) {
-      res.status(503).json({ error: "PHARMACY_ADMIN_TOKEN not configured" });
-      return;
-    }
-
-    const auth = req.headers.authorization;
-    if (!auth?.startsWith("Bearer ")) {
-      res
-        .status(401)
-        .setHeader("WWW-Authenticate", "Bearer")
-        .json({ error: "Missing admin token" });
-      return;
-    }
-
-    if (auth.slice("Bearer ".length) !== adminToken) {
-      res.status(403).json({ error: "Invalid admin token" });
-      return;
-    }
-
-    next();
-  };
-}
-
-function sendCrudNotFound(res: express.Response, message: string) {
-  res.status(404).json({ error: message });
+function sendCrudNotFound(res: express.Response, message: string, code: string = "NOT_FOUND") {
+  res.status(404).json({ error: message, code });
 }
 
 export function createPharmacyApp(options: PharmacyAppOptions) {
@@ -89,8 +66,7 @@ export function createPharmacyApp(options: PharmacyAppOptions) {
   applySecurityMiddleware(app);
   app.use(createCorsMiddleware());
   app.use(express.json({ limit: process.env.JSON_BODY_LIMIT ?? "20kb" }));
-  app.use(requestContextMiddleware());
-  app.use(requestLoggerMiddleware());
+  app.use(requestLifecycleMiddleware());
 
   app.get("/", (_req, res) => {
     res.json({
@@ -135,13 +111,14 @@ export function createPharmacyApp(options: PharmacyAppOptions) {
     });
   }
 
-  const requireAdmin = createAdminMiddleware(adminToken);
+  const requireAdmin = createPharmacyAdminAuth(adminToken);
 
   app.post("/pharmacy/drugs", requireAdmin, (req, res) => {
     const parsedBody = DrugRecordSchema.safeParse(req.body);
     if (!parsedBody.success) {
       res.status(400).json({
         error: parsedBody.error.issues[0]?.message ?? "Invalid drug payload",
+        code: "VALIDATION_INVALID_INPUT",
       });
       return;
     }
@@ -161,6 +138,7 @@ export function createPharmacyApp(options: PharmacyAppOptions) {
     if (!parsedBody.success) {
       res.status(400).json({
         error: parsedBody.error.issues[0]?.message ?? "Invalid drug payload",
+        code: "VALIDATION_INVALID_INPUT",
       });
       return;
     }
@@ -174,7 +152,7 @@ export function createPharmacyApp(options: PharmacyAppOptions) {
       ? req.params.drugName[0]
       : req.params.drugName;
     if (!pricingStore.deleteDrug(drugName)) {
-      sendCrudNotFound(res, `Drug not found: ${drugName}`);
+      sendCrudNotFound(res, `Drug not found: ${drugName}`, "NOT_FOUND_DRUG");
       return;
     }
 
@@ -187,6 +165,7 @@ export function createPharmacyApp(options: PharmacyAppOptions) {
       res.status(400).json({
         error:
           parsedBody.error.issues[0]?.message ?? "Invalid pharmacy payload",
+        code: "VALIDATION_INVALID_INPUT",
       });
       return;
     }
@@ -209,6 +188,7 @@ export function createPharmacyApp(options: PharmacyAppOptions) {
       res.status(400).json({
         error:
           parsedBody.error.issues[0]?.message ?? "Invalid pharmacy payload",
+        code: "VALIDATION_INVALID_INPUT",
       });
       return;
     }
@@ -224,7 +204,7 @@ export function createPharmacyApp(options: PharmacyAppOptions) {
       ? req.params.pharmacyId[0]
       : req.params.pharmacyId;
     if (!pricingStore.deletePharmacy(pharmacyId)) {
-      sendCrudNotFound(res, `Pharmacy not found: ${pharmacyId}`);
+      sendCrudNotFound(res, `Pharmacy not found: ${pharmacyId}`, "NOT_FOUND_PHARMACY");
       return;
     }
 
@@ -237,6 +217,7 @@ export function createPharmacyApp(options: PharmacyAppOptions) {
       res.status(400).json({
         error:
           parsedBody.error.issues[0]?.message ?? "Invalid pharmacy price payload",
+        code: "VALIDATION_INVALID_INPUT",
       });
       return;
     }
@@ -263,6 +244,7 @@ export function createPharmacyApp(options: PharmacyAppOptions) {
       res.status(400).json({
         error:
           parsedQuery.error.issues[0]?.message ?? "Invalid pharmacy query parameters",
+        code: "VALIDATION_INVALID_INPUT",
       });
       return;
     }
@@ -287,13 +269,20 @@ export function createPharmacyApp(options: PharmacyAppOptions) {
       );
     } catch (error) {
       pharmacyUnknownDrugTotal.inc({ drug });
-      res.status(404).json({ ok: false, reason: "NO_PRICES_FOUND" });
+      res.status(404).json({
+        error: `No pricing records found for drug: ${drug}`,
+        code: "NOT_FOUND_DRUG",
+      });
     }
   });
 
   app.use((err: any, _req: express.Request, res: express.Response, next: express.NextFunction) => {
     if (err.type === "entity.too.large") {
-      return res.status(413).json({ error: "Request body too large", limit: err.limit });
+      return res.status(413).json({
+        error: "Request body too large",
+        code: "BODY_TOO_LARGE",
+        details: { limit: err.limit },
+      });
     }
     next(err);
   });
@@ -315,20 +304,16 @@ export function createPharmacyApp(options: PharmacyAppOptions) {
   };
 }
 
-export const defaultPharmacyApp: ReturnType<typeof createPharmacyApp> | undefined = PAY_TO
-  ? createPharmacyApp({ payTo: PAY_TO })
-  : undefined;
+export const defaultPharmacyApp: ReturnType<typeof createPharmacyApp> = createPharmacyApp({
+  payTo: PAY_TO,
+});
 
 const entrypointUrl = process.argv[1]
   ? pathToFileURL(path.resolve(process.argv[1])).href
   : "";
 
 if (import.meta.url === entrypointUrl) {
-  if (!PAY_TO) {
-    throw new Error("PHARMACY_1_PUBLIC_KEY required in .env");
-  }
-
-  const startedApp = defaultPharmacyApp ?? createPharmacyApp({ payTo: PAY_TO });
+  const startedApp = defaultPharmacyApp;
   const server = startedApp.app.listen(PORT, () => {
     logger.info(
       {

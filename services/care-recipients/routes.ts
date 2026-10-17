@@ -1,5 +1,6 @@
 import { Router, type Request, type Response, type NextFunction } from "express";
-import type { CareRecipientsStore, CareRecipient } from "./db.ts";
+import type { CareRecipientsStore, CareRecipientEntity } from "./db.ts";
+import { registerKnownNames } from "../../shared/redact.ts";
 
 function parseCookies(cookieHeader: string | undefined): Record<string, string> {
   const list: Record<string, string> = {};
@@ -58,7 +59,7 @@ export function createCareRecipientsRouter(store: CareRecipientsStore, caregiver
   });
 
   router.post("/recipients", auth, (req, res) => {
-    const body = req.body as Partial<CareRecipient>;
+    const body = req.body as Partial<CareRecipientEntity>;
     if (!body?.name || typeof body.name !== "string" || !body.name.trim()) {
       res.status(400).json({ error: "name is required" });
       return;
@@ -71,6 +72,7 @@ export function createCareRecipientsRouter(store: CareRecipientsStore, caregiver
       insurance: typeof body.insurance === "string" ? body.insurance : null,
       caregiver_user_id: null,
     });
+    registerKnownNames([created.name]);
     res.status(201).json(created);
   });
 

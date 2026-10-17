@@ -14,7 +14,7 @@ export interface AgentLlmError {
 
 export interface AgentResult {
   response: string;
-  toolCalls: Array<{ tool: string; input: unknown; result: any }>;
+  toolCalls: Array<{ id?: string; tool: string; input: unknown; result: any }>;
   spending: SpendingData;
   llmUsage?: {
     promptTokens: number;

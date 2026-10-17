@@ -25,7 +25,7 @@ export type ValidationIssue = {
   message: string;
 };
 
-function formatIssues(issues: z.ZodIssue[]): ValidationIssue[] {
+function formatIssues(issues: z.ZodError["issues"]): ValidationIssue[] {
   return issues.map((issue) => ({
     path: issue.path.length > 0 ? issue.path.join(".") : "<root>",
     message: issue.message,
@@ -109,7 +109,7 @@ export function auditBill(lineItems: any[], options: AuditBillOptions = {}) {
   const network = options.network ?? "stellar:testnet";
   const payTo = options.payTo ?? process.env.BILL_PROVIDER_PUBLIC_KEY ?? "";
   const allowlist = options.duplicateAllowlist ?? new Set(["96372", "97110"]);
-  const getThreshold = options.getAuditThreshold ?? (() => options.overchargeMultiplier ?? 1.5);
+  const getThreshold = options.getAuditThreshold ?? ((_cptCode?: string) => options.overchargeMultiplier ?? 1.5);
   const suggestedMultiplier = options.suggestedMultiplier ?? 1.2;
   const upcodedMultiplier = options.upcodedMultiplier ?? 3.0;
   const ratesAsOf = options.ratesAsOf ?? "2026-01-01";

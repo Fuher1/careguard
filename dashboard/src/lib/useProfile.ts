@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import type { CaregiverProfile, RecipientProfile } from "./types";
 import { AGENT_URL } from "./agent-url";
-import { fetchProfile, DEFAULT_RECIPIENT, DEFAULT_CAREGIVER } from "./fetchProfile";
+import { fetchProfile, DEFAULT_RECIPIENT, DEFAULT_CAREGIVER } from "./fetch-profile";
 import { agentFetch } from "./agent-fetch";
 
 type ProfilePatch = {

@@ -5,7 +5,7 @@ import fs from "fs";
 
 process.env.LOG_LEVEL = "silent";
 process.env.CAREGIVER_TOKEN = process.env.CAREGIVER_TOKEN || "test-caregiver-token";
-process.env.AGENT_SECRET_KEY = process.env.AGENT_SECRET_KEY || "SAKYNUBM36I4L6H5X2B7QYY46X2F52BNV25SHT2R6S3N7J4D4FMM5XQ6";
+process.env.AGENT_SECRET_KEY = process.env.AGENT_SECRET_KEY || "SAQDKF5AKPWQZRXGHLH523VC7DU46U7IEQNOALOUO2A2UR55NWPVDRGF";
 process.env.MOCK_NETWORK = "1";
 process.env.STELLAR_NETWORK = "testnet";
 process.env.PHARMACY_1_PUBLIC_KEY = process.env.PHARMACY_1_PUBLIC_KEY || "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5";
@@ -59,9 +59,26 @@ export function createHorizonMock() {
   };
 }
 
+vi.mock("next/navigation", () => {
+  const searchParams = new URLSearchParams();
+  return {
+    useSearchParams: () => searchParams,
+    usePathname: () => "/",
+    useRouter: () => ({
+      push: vi.fn(),
+      replace: vi.fn(),
+      prefetch: vi.fn(),
+      back: vi.fn(),
+      forward: vi.fn(),
+      refresh: vi.fn(),
+    }),
+  };
+});
+
 afterEach(() => {
   const dir = process.env.DATA_DIR;
   if (dir && fs.existsSync(dir)) {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+

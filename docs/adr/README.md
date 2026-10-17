@@ -1,3 +1,22 @@
+# Architectural Decision Records (ADRs)
+
+This directory contains records of key architectural decisions made in the CareGuard project.
+
+## Index
+
+| ADR ID | Decision Record | Status | Date |
+|--------|-----------------|--------|------|
+| **001** | [001-pharmacy-zip.md](001-pharmacy-zip.md) — Zip Code-Aware Pharmacy Pricing Model | Accepted | 2026-06-25 |
+| **002** | [002-pii-in-persistence.md](002-pii-in-persistence.md) — PII-Sensitive Data in Local Persistence | Accepted | 2026-06-29 |
+| **004** | [004-pharmacy-pricing-source.md](004-pharmacy-pricing-source.md) — Pharmacy Pricing Source Integration | Accepted | 2026-07-10 |
+| **005** | [005-strict-type-checking-flags.md](005-strict-type-checking-flags.md) — Deferred Adoption of noUncheckedIndexedAccess and noImplicitOverride | Proposed | 2026-08-27 |
+| **006** | [006-typescript-runtime.md](006-typescript-runtime.md) — TypeScript Runtime Strategy | Accepted | 2026-07-22 |
+| **008** | [008-audit-log-hash-chain.md](008-audit-log-hash-chain.md) — Append-Only Hash-Chained Audit Log Design | Accepted | 2026-07-27 |
+| **009** | [009-stop-agent-http-loopback.md](009-stop-agent-http-loopback.md) — Stop Routing Agent Tool Calls Over HTTP Loopback | Proposed | 2026-08-27 |
+| **010** | [010-standardize-storage-layer.md](010-standardize-storage-layer.md) — Standardize Storage-Layer Conventions | Proposed | 2026-08-27 |
+| **011** | [011-shared-server-bootstrap.md](011-shared-server-bootstrap.md) — Extract a Shared Server-Bootstrap Module | Proposed | 2026-08-27 |
+| **012** | [012-namespace-metrics-per-service.md](012-namespace-metrics-per-service.md) — Namespace Shared Metrics Per Service | Proposed | 2026-08-27 |
+| **—**   | [unified-vs-split-server.md](unified-vs-split-server.md) — Unified vs Split Server Architecture | Accepted | 2026-07-15 |
 # Architecture Decision Records
 
 This directory records key architectural decisions for CareGuard.
@@ -44,8 +63,13 @@ Every ADR has one of the following statuses:
 | 002 | [PII in Persistence and Audit](002-pii-in-persistence.md) | Accepted |
 | 003 | [Unified vs. Split Server](unified-vs-split-server.md) | Accepted |
 | 004 | [Pharmacy Pricing Source](004-pharmacy-pricing-source.md) | Accepted |
-| 005 | *(vacant — reserved)* | — |
+| 005 | [Deferred Adoption of noUncheckedIndexedAccess and noImplicitOverride](005-strict-type-checking-flags.md) | Proposed |
 | 006 | [TypeScript Runtime Strategy](006-typescript-runtime.md) | Accepted |
+| 008 | [Append-Only Hash-Chained Audit Log](008-audit-log-hash-chain.md) | Accepted |
+| 009 | [Stop Agent HTTP Loopback](009-stop-agent-http-loopback.md) | Proposed |
+| 010 | [Standardize Storage-Layer Conventions](010-standardize-storage-layer.md) | Proposed |
+| 011 | [Shared Server-Bootstrap Module](011-shared-server-bootstrap.md) | Proposed |
+| 012 | [Namespace Metrics Per Service](012-namespace-metrics-per-service.md) | Proposed |
 
 > **Note:** ADR 003 was originally documented as `unified-vs-split-server.md`
 > without a numeric prefix. It is canonically referenced as ADR 003 in this

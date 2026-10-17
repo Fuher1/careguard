@@ -8,6 +8,12 @@ description = "Stellar Secret Seed Key"
 regex = '''S[A-Z2-7]{55}'''
 tags = ["key", "stellar"]
 
+[rules.allowlist]
+description = "Checksum-valid testnet keypairs used only as test fixtures, never real secrets"
+regexes = [
+  '''SAQDKF5AKPWQZRXGHLH523VC7DU46U7IEQNOALOUO2A2UR55NWPVDRGF''', # tests/setup.ts fallback AGENT_SECRET_KEY
+]
+
 [[rules]]
 id = "groq-api-key"
 description = "Groq API Key"

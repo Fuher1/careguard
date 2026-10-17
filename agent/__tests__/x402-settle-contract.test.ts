@@ -33,7 +33,7 @@ describe("x402 Facilitator settle — contract (Issue #814)", () => {
   it("pinned settle-success response is validated", () => {
     const settleResponse = {
       status: "success",
-      transactionHash: "c1a7f0c3e8d9b5a2f7e4d1c8b9a6f3e0d7c4b1a8f5e2d9c6b3a0f7e4d1c8",
+      transactionHash: "fc552f181bd318b300429b36c37e12e11abc8b1281fa726f75472b777c122e02",
       settlementId: "settle-123",
     };
 
@@ -43,11 +43,11 @@ describe("x402 Facilitator settle — contract (Issue #814)", () => {
 
   it("stellar tx hash is extracted from settle response", () => {
     const settleResponse = {
-      paymentResponse: "c1a7f0c3e8d9b5a2f7e4d1c8b9a6f3e0d7c4b1a8f5e2d9c6b3a0f7e4d1c8",
+      paymentResponse: "fc552f181bd318b300429b36c37e12e11abc8b1281fa726f75472b777c122e02",
     };
 
     const txHash = extractX402TxHash(settleResponse);
-    expect(txHash).toBe("c1a7f0c3e8d9b5a2f7e4d1c8b9a6f3e0d7c4b1a8f5e2d9c6b3a0f7e4d1c8");
+    expect(txHash).toBe("fc552f181bd318b300429b36c37e12e11abc8b1281fa726f75472b777c122e02");
   });
 
   it("settle response lacking tx hash returns undefined (no fallback)", () => {
@@ -73,7 +73,7 @@ describe("x402 Facilitator settle — contract (Issue #814)", () => {
   });
 
   it("extracted hash is valid Stellar transaction hash format", () => {
-    const validHash = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a";
+    const validHash = "32eb1a47202c2e84177b5b371f0baa53ab1b8bf6c4e211c467e7cee7d385cc69";
     expect(validHash).toMatch(/^[a-f0-9]{64}$/);
     expect(validHash.length).toBe(64);
   });
@@ -86,7 +86,7 @@ describe("x402 Facilitator settle — contract (Issue #814)", () => {
       },
       expectedResponse: {
         status: "success",
-        transactionHash: "c1a7f0c3e8d9b5a2f7e4d1c8b9a6f3e0d7c4b1a8f5e2d9c6b3a0f7e4d1c8",
+        transactionHash: "fc552f181bd318b300429b36c37e12e11abc8b1281fa726f75472b777c122e02",
         settlementId: "settle-123",
       },
     };
@@ -115,7 +115,7 @@ describe("x402 Facilitator settle — contract (Issue #814)", () => {
   it("settlement confirmed when tx hash present and valid", () => {
     const settleResponse = {
       status: "success",
-      transactionHash: "b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b",
+      transactionHash: "d3e253f80a345c330dd6b663eadb74042f5ad06031502249e3d58a1364091c4a",
     };
 
     const txHash = extractX402TxHash({ paymentResponse: settleResponse.transactionHash });
@@ -136,29 +136,29 @@ describe("x402 Facilitator settle — contract (Issue #814)", () => {
 
   it("PAYMENT-RESPONSE header variant is recognized", () => {
     const response = {
-      "PAYMENT-RESPONSE": "c1a7f0c3e8d9b5a2f7e4d1c8b9a6f3e0d7c4b1a8f5e2d9c6b3a0f7e4d1c8",
+      "PAYMENT-RESPONSE": "fc552f181bd318b300429b36c37e12e11abc8b1281fa726f75472b777c122e02",
     };
 
     const txHash = extractX402TxHash(response);
-    expect(txHash).toBe("c1a7f0c3e8d9b5a2f7e4d1c8b9a6f3e0d7c4b1a8f5e2d9c6b3a0f7e4d1c8");
+    expect(txHash).toBe("fc552f181bd318b300429b36c37e12e11abc8b1281fa726f75472b777c122e02");
   });
 
   it("payment-response lowercase header variant is recognized", () => {
     const response = {
-      "payment-response": "d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7",
+      "payment-response": "5d62c1eef81bc713ff1d984bef4cae6383594affc8d001b8737a278b136490c9",
     };
 
     const txHash = extractX402TxHash(response);
-    expect(txHash).toBe("d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7");
+    expect(txHash).toBe("5d62c1eef81bc713ff1d984bef4cae6383594affc8d001b8737a278b136490c9");
   });
 
   it("X-PAYMENT-RESPONSE header variant is recognized", () => {
     const response = {
-      "X-PAYMENT-RESPONSE": "e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8",
+      "X-PAYMENT-RESPONSE": "9c3d6d3c9527ded9dcafc7e58e47d0a9ce85d71ecdcd139d1819aeb885e37f8b",
     };
 
     const txHash = extractX402TxHash(response);
-    expect(txHash).toBe("e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8");
+    expect(txHash).toBe("9c3d6d3c9527ded9dcafc7e58e47d0a9ce85d71ecdcd139d1819aeb885e37f8b");
   });
 
   it("refresh procedure: re-ping OZ facilitator settle endpoint", () => {

@@ -32,20 +32,18 @@ export function ConfirmDialog({
 
   useEffect(() => {
     if (!open) return;
+    // Only Escape needs handling here. Enter on a focused <button> is already
+    // activated by the browser, which fires the button's own onClick — handling
+    // it again here would invoke onConfirm twice for a single keypress.
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         e.preventDefault();
         onCancel();
-        return;
-      }
-      if (e.key === "Enter" && document.activeElement === confirmRef.current) {
-        e.preventDefault();
-        onConfirm();
       }
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [open, onCancel, onConfirm]);
+  }, [open, onCancel]);
 
   if (!open) return null;
 

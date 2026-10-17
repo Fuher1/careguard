@@ -17,8 +17,10 @@ vi.mock("dotenv/config", () => ({}));
 vi.mock("fs", () => ({
   readFileSync: vi.fn().mockReturnValue("{}"),
   writeFileSync: vi.fn(),
+  appendFileSync: vi.fn(),
   existsSync: vi.fn().mockReturnValue(false),
   mkdirSync: vi.fn(),
+  renameSync: vi.fn(),
 }));
 vi.mock("@stellar/stellar-sdk", () => ({
   Keypair: {
@@ -70,8 +72,8 @@ import {
 const DEFAULT_POLICY = {
   dailyLimit: 100,
   monthlyLimit: 500,
-  medicationMonthlyBudget: 300,
-  billMonthlyBudget: 500,
+  medicationMonthlyBudget: 200,
+  billMonthlyBudget: 300,
   approvalThreshold: 75,
 };
 
@@ -120,15 +122,16 @@ describe("payBill — tx_bad_seq retry (Issues #197 / #282)", () => {
 
   it("surfaces error when retry also fails", async () => {
     mockLoadAccount.mockResolvedValue(mockAccount);
-    mockSubmitTransaction
-      .mockRejectedValueOnce(makeSeqError())
-      .mockRejectedValueOnce(makeSeqError());
+    // Every attempt (initial + all inner reload/retry cycles) keeps failing
+    // with a sequence error, so the retry loop exhausts its bounded attempts
+    // and surfaces the final error instead of retrying forever.
+    mockSubmitTransaction.mockRejectedValue(makeSeqError());
 
     const result = await payBill("provider-1", "General Hospital", "ER Visit", 50);
 
     expect(result.success).toBe(false);
     expect((result as any).error).toContain("Stellar USDC transfer failed");
-    expect(getPaybillSeqRetryTotal()).toBe(1);
+    expect(getPaybillSeqRetryTotal()).toBe(3);
   });
 
   it("does not retry on non-sequence errors", async () => {

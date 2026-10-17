@@ -1,4 +1,5 @@
 import { EXPLORER_TX_URL } from "../../lib/stellar-network";
+import { truncateTransactionHash } from "../../lib/tx-hash";
 
 // Backend guarantees stellarTxHash is always a real 64-char hex hash or
 // undefined (#14) — no more base64/receipt decoding needed here.
@@ -33,7 +34,7 @@ export function TxLink({ hash, txHashStatus }: TxLinkProps) {
       className="text-xs text-sky-600 hover:text-sky-800 underline font-mono"
       title={`View on Stellar Explorer: ${hash}`}
     >
-      {hash.slice(0, 8)}...
+      {truncateTransactionHash(hash)}
     </a>
   );
 }

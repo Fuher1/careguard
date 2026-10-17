@@ -56,7 +56,7 @@ function ItemRow({
           )}
         </div>
         <div className="hidden md:block text-xs text-slate-500">
-          CPT: {item.cptCode}
+          CPT: {item.cptCode || "N/A"}
         </div>
         <details className="md:hidden mt-1">
           <summary className="cursor-pointer text-xs text-slate-500">
@@ -163,9 +163,10 @@ export function BillLineItemsVirtualized({
         >
           {virtualizer.getVirtualItems().map((virtualItem) => {
             const item = lineItems[virtualItem.index];
+            const stableKey = `${item.description}:${item.cptCode ?? ""}:${item.chargedAmount}`;
             return (
               <div
-                key={virtualItem.index}
+                key={stableKey}
                 style={{
                   position: "absolute",
                   top: 0,

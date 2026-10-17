@@ -1,9 +1,14 @@
 import { describe, it, expect, vi } from "vitest";
-import { generateMetadata } from "../app/layout";
+import RootLayout, { generateMetadata } from "../app/layout";
+import { render } from "@testing-library/react";
 
 vi.mock("next/font/google", () => ({
   Geist: () => ({ variable: "--font-geist-sans" }),
   Geist_Mono: () => ({ variable: "--font-geist-mono" }),
+}));
+
+vi.mock("@/components/ui/toaster", () => ({
+  Toaster: () => <div data-testid="toaster" />,
 }));
 
 const mockProfile = {
@@ -17,7 +22,7 @@ vi.mock("../lib/useProfile", () => ({
   useProfile: () => mockProfile,
 }));
 
-vi.mock("../lib/fetchProfile", () => ({
+vi.mock("../lib/fetch-profile", () => ({
   fetchProfile: async () => mockProfile,
 }));
 
@@ -44,5 +49,15 @@ describe("Layout Dynamic Metadata", () => {
     mockProfile.recipient.name = "Alice Smith";
     const metadata = await generateMetadata({ params: {} });
     expect(metadata.title).toBe("Alice Smith's CareGuard");
+  });
+
+  it("should render html element with lang derived from active locale (Issue #1127)", () => {
+    const { container } = render(
+      <RootLayout>
+        <div>Content</div>
+      </RootLayout>
+    );
+    const htmlElem = container.querySelector("html");
+    expect(htmlElem).toHaveAttribute("lang", "en");
   });
 });
