@@ -17,6 +17,7 @@ const FIELDS: Array<[keyof SpendingPolicyInput, string]> = [
   ["billMonthlyBudget", "Bill Monthly Budget ($)"],
   ["approvalThreshold", "Caregiver Approval Threshold ($)"],
   ["holdTimeSeconds", "Hold Time Before Auto-Approval (seconds)"],
+  ["warningThresholdPct", "Budget Warning Threshold (%)"],
 ];
 
 /** Per-field HTML input constraints — kept in sync with schemas.ts (#211). */
@@ -24,12 +25,20 @@ const FIELD_CONFIG: Record<
   keyof SpendingPolicyInput,
   { min: number; max: number; step: number }
 > = {
-  dailyLimit:              { min: 1, max: 50000, step: 1 },
-  monthlyLimit:            { min: 1, max: 50000, step: 1 },
+  dailyLimit: { min: 1, max: 50000, step: 1 },
+  monthlyLimit: { min: 1, max: 50000, step: 1 },
   medicationMonthlyBudget: { min: 1, max: 50000, step: 1 },
-  billMonthlyBudget:       { min: 1, max: 50000, step: 1 },
-  approvalThreshold:       { min: 1, max: 50000, step: 1 },
-  holdTimeSeconds:         { min: 0, max: 86400, step: 1 },
+  billMonthlyBudget: { min: 1, max: 50000, step: 1 },
+  approvalThreshold: { min: 1, max: 50000, step: 1 },
+  holdTimeSeconds: { min: 0, max: 86400, step: 1 },
+  warningThresholdPct: { min: 1, max: 99, step: 1 },
+};
+
+/** Optional helper hints shown below specific fields. */
+const FIELD_HINT: Partial<Record<keyof SpendingPolicyInput, string>> = {
+  warningThresholdPct:
+    "Sends a notification when spending reaches this % of a budget. The transaction still proceeds — this is a soft alert, not a hard block. Default: 80.",
+  holdTimeSeconds: "0 = auto-approve immediately. Max 86400 (24 h).",
 };
 
 /**
@@ -74,7 +83,10 @@ export interface PolicyTabProps {
   onForceSync: () => void;
 }
 
-function errorFor(field: keyof SpendingPolicyInput, errors: PolicyFieldError[]) {
+function errorFor(
+  field: keyof SpendingPolicyInput,
+  errors: PolicyFieldError[],
+) {
   return errors.find((e) => e.field === field)?.message;
 }
 
@@ -90,8 +102,12 @@ export function PolicyTab({
 }: PolicyTabProps) {
   const validation = useMemo(() => validatePolicy(policyForm), [policyForm]);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
-  const [toastFallback, setToastFallback] = useState<string | undefined>(undefined);
-  const [confirmRows, setConfirmRows] = useState<PolicyChangeRow[] | null>(null);
+  const [toastFallback, setToastFallback] = useState<string | undefined>(
+    undefined,
+  );
+  const [confirmRows, setConfirmRows] = useState<PolicyChangeRow[] | null>(
+    null,
+  );
   const [requiresTyped, setRequiresTyped] = useState(false);
   const [typedValue, setTypedValue] = useState("");
 
@@ -121,7 +137,14 @@ export function PolicyTab({
       const increased =
         Number.isFinite(before) && Number.isFinite(after) && after > before;
       const doubled = increased && before > 0 && after > before * 2;
-      return { key, label: FIELD_LABELS[key] ?? key, before, after, increased, doubled };
+      return {
+        key,
+        label: FIELD_LABELS[key] ?? key,
+        before,
+        after,
+        increased,
+        doubled,
+      };
     }).filter((row) => row.before !== row.after);
 
     const increases = rows.filter((row) => row.increased);
@@ -161,7 +184,8 @@ export function PolicyTab({
         Spending Policy for {recipient.name}
       </h2>
       <p className="text-xs text-slate-500 mb-6">
-        These limits are enforced server-side by the CareGuard agent before every payment.
+        These limits are enforced server-side by the CareGuard agent before
+        every payment.
       </p>
       <form noValidate onSubmit={handleSubmit} className="space-y-4">
         {FIELDS.map(([key, label]) => {
@@ -184,7 +208,11 @@ export function PolicyTab({
                 min={FIELD_CONFIG[key].min}
                 max={FIELD_CONFIG[key].max}
                 step={FIELD_CONFIG[key].step}
-                value={Number.isFinite(policyForm[key]) ? policyForm[key] : ""}
+                value={
+                  Number.isFinite(policyForm[key] as number)
+                    ? policyForm[key]
+                    : ""
+                }
                 aria-invalid={Boolean(errMsg)}
                 aria-describedby={errMsg || warnMsg ? errorId : undefined}
                 onChange={(e) => {
@@ -208,6 +236,9 @@ export function PolicyTab({
                 <p id={errorId} className="mt-1 text-xs text-amber-600">
                   Warning: {warnMsg}
                 </p>
+              )}
+              {!errMsg && !warnMsg && FIELD_HINT[key] && (
+                <p className="mt-1 text-xs text-slate-400">{FIELD_HINT[key]}</p>
               )}
             </div>
           );
@@ -286,7 +317,9 @@ export function PolicyTab({
                       ${row.after}
                     </span>
                     {row.doubled && (
-                      <span className="ml-1 text-red-600">(more than 2&times;)</span>
+                      <span className="ml-1 text-red-600">
+                        (more than 2&times;)
+                      </span>
                     )}
                   </span>
                 </li>

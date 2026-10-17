@@ -13,7 +13,7 @@
  * For interactions with equal severity, sort alphabetically by drug names.
  */
 
-import { z } from 'zod';
+import { z } from "zod";
 
 // ── Medication ────────────────────────────────────────────────────────────────
 
@@ -35,7 +35,7 @@ export const PharmacyPriceSchema = z.object({
   pharmacyId: z.string().min(1),
   price: z.number().nonnegative(),
   distance: z.string().optional(),
-  inStock: z.union([z.boolean(), z.literal('unknown')]),
+  inStock: z.union([z.boolean(), z.literal("unknown")]),
 });
 
 export type PharmacyPrice = z.infer<typeof PharmacyPriceSchema>;
@@ -61,7 +61,7 @@ export const BillLineItemSchema = z.object({
   cptCode: z.string().optional(),
   chargedAmount: z.number().nonnegative(),
   fairMarketRate: z.number().nonnegative().optional(),
-  status: z.enum(['valid', 'duplicate', 'upcoded', 'unbundled', 'error']),
+  status: z.enum(["valid", "duplicate", "upcoded", "unbundled", "error"]),
   errorDescription: z.string().optional(),
   suggestedAmount: z.number().nonnegative().optional(),
 });
@@ -107,6 +107,16 @@ export const SpendingPolicySchema = z.object({
       phoneNumber: z.string().optional(),
     })
     .optional(),
+  /**
+   * Soft-warning threshold as a percentage (0–99) of each budget.
+   * When spending crosses this fraction of a budget limit the agent fires a
+   * warning notification but does NOT block the transaction.
+   * Distinct from `approvalThreshold` (hard dollar gate) and from the hard
+   * block limits (dailyLimit, monthlyLimit, category budgets).
+   * Example: 80 → warn when spend reaches 80% of a budget.
+   * Defaults to DEFAULT_WARNING_THRESHOLD_PCT (80) when not set by the caregiver.
+   */
+  warningThresholdPct: z.number().int().min(1).max(99).optional(),
 });
 
 export type SpendingPolicy = z.infer<typeof SpendingPolicySchema>;
@@ -115,9 +125,9 @@ export type SpendingPolicy = z.infer<typeof SpendingPolicySchema>;
 export const STELLAR_TX_HASH_RE = /^[0-9a-f]{64}$/i;
 
 export const TRANSACTION_CATEGORY = {
-  MEDICATIONS: 'medications',
-  BILLS: 'bills',
-  SERVICE_FEES: 'service_fees',
+  MEDICATIONS: "medications",
+  BILLS: "bills",
+  SERVICE_FEES: "service_fees",
 } as const;
 
 export const TRANSACTION_CATEGORIES = [
@@ -132,7 +142,7 @@ export function isTransactionCategory(
   category: unknown,
 ): category is TransactionCategory {
   return (
-    typeof category === 'string' &&
+    typeof category === "string" &&
     (TRANSACTION_CATEGORIES as readonly string[]).includes(category)
   );
 }
@@ -150,7 +160,7 @@ export function normalizeTransactionCategory(
 export const TransactionSchema = z.object({
   id: z.string().min(1),
   timestamp: z.string().min(1),
-  type: z.enum(['medication', 'bill', 'service_fee']),
+  type: z.enum(["medication", "bill", "service_fee"]),
   description: z.string(),
   amount: z.number().nonnegative(),
   recipient: z.string(),
@@ -159,16 +169,16 @@ export const TransactionSchema = z.object({
   stellarTxHash: z.string().regex(STELLAR_TX_HASH_RE).optional(),
   // 'extracted': hash was successfully parsed from the x402 PAYMENT-RESPONSE header.
   // 'extraction_failed': header was present but all parse strategies failed (#191).
-  txHashStatus: z.enum(['extracted', 'extraction_failed']).optional(),
+  txHashStatus: z.enum(["extracted", "extraction_failed"]).optional(),
   mppOrderId: z.string().optional(),
   status: z.enum([
-    'pending',
-    'approved',
-    'completed',
-    'blocked',
-    'disputed',
-    'cancelled',
-    'rejected',
+    "pending",
+    "approved",
+    "completed",
+    "blocked",
+    "disputed",
+    "cancelled",
+    "rejected",
   ]),
   category: z.enum(TRANSACTION_CATEGORIES),
   pendingUntil: z.string().optional(),
@@ -213,11 +223,11 @@ export const AlertSchema = z.object({
   id: z.string().min(1),
   timestamp: z.string().min(1),
   type: z.enum([
-    'approval_needed',
-    'error_found',
-    'refill_due',
-    'budget_warning',
-    'policy_blocked',
+    "approval_needed",
+    "error_found",
+    "refill_due",
+    "budget_warning",
+    "policy_blocked",
   ]),
   title: z.string(),
   description: z.string(),

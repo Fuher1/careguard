@@ -9,7 +9,10 @@ export interface DashboardTabsNavProps {
   pathname: string;
 }
 
-export function DashboardTabsNav({ activeTab, pathname }: DashboardTabsNavProps) {
+export function DashboardTabsNav({
+  activeTab,
+  pathname,
+}: DashboardTabsNavProps) {
   const [focusedTab, setFocusedTab] = useState<Tab>(activeTab);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
