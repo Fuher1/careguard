@@ -18,6 +18,7 @@ import {
   type NotificationChannel,
   type NotificationEventType,
 } from "../../../../shared/notifications";
+import { ConsentSettingsSection } from "../consent-settings-section";
 
 export interface RecipientOption {
   id: string;
@@ -632,7 +633,10 @@ export function SettingsTab({
       </div>
 
       {selectedRecipientId && (
-        <LinkedCaregiversSection recipientId={selectedRecipientId} locale={locale} />
+        <>
+          <LinkedCaregiversSection recipientId={selectedRecipientId} locale={locale} />
+          <ConsentSettingsSection recipientId={selectedRecipientId} />
+        </>
       )}
 
       <div className="bg-white rounded-xl border border-slate-200 p-6">

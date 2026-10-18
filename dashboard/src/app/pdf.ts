@@ -8,6 +8,8 @@ import type {
   SpendingData,
   Transaction,
   DisputeLetter,
+  RecipientAllergy,
+  CostSplit,
 } from "../lib/types";
 import { DEFAULT_PDF_THEME, type PdfTheme } from "../lib/pdf-theme";
 import { formatVital, type RecipientProfile, type Vital } from "../lib/types";
@@ -380,7 +382,11 @@ export function downloadMedicationPDF(
 export function downloadTransactionPDF(
   transactions: Transaction[],
   spending: SpendingData | null,
-  options?: { theme?: PdfTheme; recipient?: RecipientProfile },
+  options?: {
+    theme?: PdfTheme;
+    recipient?: RecipientProfile;
+    costSplits?: CostSplit[];
+  }
 ) {
   const theme = options?.theme ?? DEFAULT_PDF_THEME;
   const recipient = options?.recipient ?? {
@@ -464,6 +470,44 @@ export function downloadTransactionPDF(
       6: { cellWidth: 25, fontStyle: "italic" },
     },
   });
+
+  // Cost splits table (Issue #1220)
+  if (options?.costSplits && options.costSplits.length > 0) {
+    const finalY = (doc as any).lastAutoTable?.finalY ?? y + 50;
+    let splitY = finalY + 12;
+    if (splitY > 230) {
+      doc.addPage();
+      splitY = 30;
+      addHeader(doc, "Caregiver Cost Splits", `Patient: ${formatRecipient(recipient)}`, theme);
+    }
+    doc.setFontSize(11);
+    doc.setTextColor(15, 23, 42);
+    doc.text("Caregiver Cost Splits & Split Balances", 14, splitY);
+    splitY += 4;
+
+    const splitRows: any[] = [];
+    for (const split of options.costSplits) {
+      for (const share of split.shares) {
+        splitRows.push([
+          new Date(split.createdAt).toLocaleDateString(),
+          split.description || "Healthcare Expense",
+          `$${split.totalAmount.toFixed(2)}`,
+          split.payerName,
+          share.caregiverName,
+          `$${share.amount.toFixed(2)}`,
+          share.status === "settled" ? "Paid Back" : "Owed",
+        ]);
+      }
+    }
+
+    autoTable(doc, {
+      startY: splitY,
+      head: [["Date", "Expense", "Total", "Payer", "Contributor", "Share", "Status"]],
+      body: splitRows,
+      headStyles: { fillColor: theme.headerColor, fontSize: 7 },
+      bodyStyles: { fontSize: 7 },
+    });
+  }
 
   addFooter(doc);
   try {

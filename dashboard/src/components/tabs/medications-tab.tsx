@@ -8,6 +8,11 @@ import {
   type RecipientProfile,
   type Transaction,
   ORDER_STATUS,
+  type Vital,
+  type RecipientAllergy,
+  type AllergySeverity,
+  type CaregiverProfile,
+  type ConsentSettings,
 } from "../../lib/types";
 import type { AgentResult } from "../types";
 import { VitalsSection } from "../vitals-section";
@@ -38,12 +43,18 @@ export interface MedicationsTabProps {
   recipient: RecipientProfile;
   /** All medication transactions — used to show order lifecycle status. */
   allTransactions?: Transaction[];
+  locale?: Locale;
+  currentCaregiver?: CaregiverProfile;
+  consentSettings?: ConsentSettings;
 }
 
 export function MedicationsTab({
   agentResult,
   recipient,
   allTransactions = [],
+  locale = "en",
+  currentCaregiver,
+  consentSettings,
 }: MedicationsTabProps) {
   // Find the most recent medication order for each drug name
   const latestOrderByDrug = allTransactions
@@ -56,6 +67,15 @@ export function MedicationsTab({
       return acc;
     }, {});
 
+  const isRestricted =
+    currentCaregiver &&
+    currentCaregiver.role &&
+    currentCaregiver.role !== "owner" &&
+    consentSettings &&
+    consentSettings[currentCaregiver.role]?.medications === false;
+
+  const t = getTranslations(locale).medications;
+  const [vitals, setVitals] = useState<Vital[]>([]);
   const hasPriceResults = agentResult?.toolCalls.some(
     (tc) => tc.tool === "compare_pharmacy_prices",
   );
@@ -319,6 +339,45 @@ export function MedicationsTab({
       return updated;
     });
   };
+
+  if (isRestricted) {
+    return (
+      <div
+        role="tabpanel"
+        id="tabpanel-medications"
+        aria-labelledby="tab-medications"
+        tabIndex={0}
+        className="space-y-6"
+      >
+        <div className="bg-amber-50 border border-amber-200 rounded-xl p-8 text-center max-w-xl mx-auto my-12">
+          <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-amber-100 text-amber-600">
+            <svg
+              className="h-6 w-6"
+              fill="none"
+              viewBox="0 0 24 24"
+              strokeWidth={1.5}
+              stroke="currentColor"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M16.5 10.5V6.75a4.5 4.5 0 1 0-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 0 0 2.25-2.25v-6.75a2.25 2.25 0 0 0-2.25-2.25H6.75a2.25 2.25 0 0 0-2.25 2.25v6.75a2.25 2.25 0 0 0 2.25 2.25Z"
+              />
+            </svg>
+          </div>
+          <h3 className="text-base font-semibold text-amber-900">
+            Access Restricted by Care Recipient
+          </h3>
+          <p className="mt-2 text-sm text-amber-700">
+            Consent settings for {recipient.name} restrict viewing medication records for {currentCaregiver.role} caregivers.
+          </p>
+          <p className="mt-1 text-xs text-amber-600">
+            Contact the primary caregiver to adjust data-sharing permissions in Settings.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div

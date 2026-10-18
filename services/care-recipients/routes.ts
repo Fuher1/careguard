@@ -25,10 +25,45 @@ import {
   type CareRecipientsStore,
   type CareRecipientEntity,
   type RecipientCaregiver,
+  type ConsentSettings,
 } from "./db.ts";
 import { sanitizeFreeText, sanitizeUserString } from "../../shared/sanitize.ts";
 import { optionalFreeTextSchema } from "../../shared/free-text.ts";
 import { notify } from "../../shared/notifications.ts";
+
+export const RoleConsentSchema = z.object({
+  medications: z.boolean().default(true),
+  bills: z.boolean().default(true),
+  wallet: z.boolean().default(true),
+});
+
+export const ConsentSettingsBodySchema = z.object({
+  owner: RoleConsentSchema.optional(),
+  "co-caregiver": RoleConsentSchema.optional(),
+  viewer: RoleConsentSchema.optional(),
+});
+
+export const CostSplitShareInputSchema = z.object({
+  caregiverId: z.string().min(1),
+  caregiverName: z.string().min(1),
+  amount: z.number().positive(),
+  status: z.enum(["owed", "settled"]).optional(),
+  settledAt: z.string().optional(),
+  settledBy: z.string().optional(),
+});
+
+export const CreateCostSplitBodySchema = z.object({
+  transactionId: z.string().min(1),
+  totalAmount: z.number().positive(),
+  payerId: z.string().optional(),
+  payerName: z.string().optional(),
+  description: z.string().optional(),
+  shares: z.array(CostSplitShareInputSchema).min(1),
+});
+
+export const SettleCostSplitShareBodySchema = z.object({
+  contributorId: z.string().min(1),
+});
 
 function parseCookies(cookieHeader: string | undefined): Record<string, string> {
   const list: Record<string, string> = {};
@@ -494,6 +529,8 @@ export function createCareRecipientsRouter(store: CareRecipientsStore, caregiver
       return;
     }
     res.json(updated);
+  });
+
   // ── Caregiver access (#1179) ───────────────────────────────────────────────
 
   router.get("/recipients/:id/caregivers", auth, canView, (req, res) => {
@@ -585,6 +622,82 @@ export function createCareRecipientsRouter(store: CareRecipientsStore, caregiver
       text: parsed.data.text,
     });
     res.status(201).json(note);
+  });
+
+  // ── Granular Data-Sharing Consent (#1218) ───────────────────────────────────
+
+  router.get("/recipients/:id/consent", auth, canView, (req, res) => {
+    res.json({
+      recipient_id: req.params.id,
+      consent: store.getConsent(req.params.id),
+    });
+  });
+
+  router.put("/recipients/:id/consent", auth, canManage, (req, res) => {
+    const parsed = ConsentSettingsBodySchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid consent settings", issues: parsed.error.issues });
+      return;
+    }
+    const principal = principalOf(res);
+    const updatedBy = authorOf(principal, undefined);
+    const updated = store.updateConsent(req.params.id, parsed.data as ConsentSettings, updatedBy);
+    res.json({
+      recipient_id: req.params.id,
+      consent: updated,
+    });
+  });
+
+  // ── Cost Splitting Ledger (#1220) ──────────────────────────────────────────
+
+  router.get("/recipients/:id/cost-splits", auth, canView, (req, res) => {
+    res.json({
+      recipient_id: req.params.id,
+      splits: store.listCostSplits(req.params.id),
+    });
+  });
+
+  router.post("/recipients/:id/cost-splits", auth, canAct, (req, res) => {
+    const parsed = CreateCostSplitBodySchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid cost split payload", issues: parsed.error.issues });
+      return;
+    }
+    const principal = principalOf(res);
+    const defaultPayer = authorOf(principal, undefined);
+    const split = store.createCostSplit({
+      recipientId: req.params.id,
+      transactionId: parsed.data.transactionId,
+      totalAmount: parsed.data.totalAmount,
+      payerId: parsed.data.payerId || (principal.kind === "caregiver" ? principal.link.caregiver_user_id : "admin"),
+      payerName: parsed.data.payerName || defaultPayer,
+      description: parsed.data.description,
+      shares: parsed.data.shares,
+    });
+    res.status(201).json(split);
+  });
+
+  router.get("/recipients/:id/cost-splits/balances", auth, canView, (req, res) => {
+    res.json({
+      recipient_id: req.params.id,
+      summary: store.getContributorBalances(req.params.id),
+    });
+  });
+
+  router.post("/recipients/:id/cost-splits/:splitId/settle", auth, canAct, (req, res) => {
+    const parsed = SettleCostSplitShareBodySchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid settlement payload", issues: parsed.error.issues });
+      return;
+    }
+    const principal = principalOf(res);
+    const settledBy = authorOf(principal, undefined);
+    try {
+      const updated = store.settleCostSplitShare(req.params.splitId, parsed.data.contributorId, settledBy);
+      res.json(updated);
+    } catch (err: any) {
+      res.status(404).json({ error: err?.message || "Cost split not found" });
+    }
   });
 
   return router;
