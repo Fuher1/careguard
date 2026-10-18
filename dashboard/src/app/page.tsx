@@ -13,6 +13,7 @@ import { BillsTab } from "../components/tabs/bills-tab";
 import { MedicationsTab } from "../components/tabs/medications-tab";
 import { OverviewTab } from "../components/tabs/overview-tab";
 import { ApprovalsTab } from "../components/tabs/approvals-tab";
+import { TasksTab } from "../components/tabs/tasks-tab";
 import { HandoffNotesTab } from "../components/tabs/handoff-notes-tab";
 import { PolicyTab } from "../components/tabs/policy-tab";
 import { SettingsTab } from "../components/tabs/settings-tab";
@@ -60,6 +61,27 @@ export default function Dashboard() {
   const localeParam = searchParams.get("locale");
   const locale: Locale = isValidLocale(localeParam || "") ? localeParam as Locale : "en";
   const state = useAgentState({ activeTab });
+
+  const [consentSettings, setConsentSettings] = useState<ConsentSettings>(DEFAULT_CONSENT_SETTINGS);
+
+  useEffect(() => {
+    if (!selectedId) return;
+    let cancelled = false;
+    caregiverFetch(`/recipients/${encodeURIComponent(selectedId)}/consent`)
+      .then(async (res) => {
+        if (cancelled) return;
+        if (res.ok) {
+          const data = await res.json();
+          if (data?.consent) {
+            setConsentSettings(data.consent);
+          }
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedId, activeTab]);
 
   const ariaLogRef = useRef<number | null>(null);
   const [debouncedAriaLog, setDebouncedAriaLog] = useState<string[]>([]);
@@ -120,7 +142,6 @@ export default function Dashboard() {
             onCancelTask={state.cancelAgentTask}
             recipient={recipient}
             locale={locale}
-            locale={DEFAULT_LOCALE}
           />
         )}
         {activeTab === "medications" && (
@@ -128,6 +149,8 @@ export default function Dashboard() {
             agentResult={state.agentResult}
             recipient={recipient}
             locale={locale}
+            currentCaregiver={caregiver}
+            consentSettings={consentSettings}
           />
         )}
         {activeTab === "bills" && (
@@ -166,6 +189,11 @@ export default function Dashboard() {
             loadingWalletBalance={state.loadingWalletBalance}
             onRetryWalletBalance={state.retryWalletBalance}
             loadingAgentInfo={state.loadingAgentInfo}
+            spending={state.spending}
+            locale={locale}
+            currentCaregiver={caregiver}
+            consentSettings={consentSettings}
+            recipientId={selectedId}
           />
         )}
         {activeTab === "activity" && (
@@ -187,6 +215,9 @@ export default function Dashboard() {
             loadingSpending={state.loadingSpending}
             locale={locale}
           />
+        )}
+        {activeTab === "tasks" && (
+          <TasksTab recipientId={selectedId ?? recipient.id} locale={locale} />
         )}
         {activeTab === "notes" && (
           <HandoffNotesTab

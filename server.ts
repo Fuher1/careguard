@@ -33,7 +33,6 @@ import { applySecurityMiddleware } from "./shared/security-middleware.ts";
 import { createApiDocsRouter } from "./shared/api-docs.ts";
 import { logger } from "./shared/logger.ts";
 import { requireApiKey } from "./shared/auth.ts";
-import { createPharmacyAdminAuth } from "./shared/pharmacy-admin-auth.ts";
 import {
   validateTask,
   getSuspiciousTaskCount,
@@ -44,6 +43,7 @@ import {
   auditBill,
   validateBillAuditRequest,
 } from "./shared/bill-audit.ts";
+import { getProviderBillHistoryStore } from "./services/bill-audit-api/history.ts";
 import { sanitizeUserString } from "./shared/sanitize.ts";
 import { registerKnownNames } from "./shared/redact.ts";
 
@@ -57,6 +57,17 @@ import {
 import { loadPresenceMap, recordItemView } from "./shared/presence.ts";
 import { extractLineItemsFromBillImage } from "./shared/bill-ocr.ts";
 import { runPriceWatchForRecipient } from "./agent/price-watch.ts";
+import {
+  loadMultisigConfig,
+  saveMultisigConfig,
+  loadMultisigRequests,
+  signAndSubmitMultisigRequest,
+  rejectMultisigRequest,
+} from "./shared/multisig.ts";
+import {
+  recordDosageChange,
+  getMedicationHistory,
+} from "./shared/medication-history.ts";
 
 // Observability
 import { requestLifecycleMiddleware } from "./shared/request-lifecycle.ts";
@@ -79,6 +90,12 @@ import {
 } from "./shared/agent-state.ts";
 import { checkWalletBalance, formatResult, fetchWalletBalances } from "./shared/wallet-balance.ts";
 import { appendAuditEntry, auditRouter } from "./shared/audit-log.ts";
+import { pushTokenRouter } from "./shared/push-tokens.ts";
+import {
+  orderStatusRouter,
+  pharmacyWebhookRouter,
+} from "./shared/order-status.ts";
+import { startOrderStatusReminderCron } from "./shared/order-status-reminder.ts";
 import {
   rateLimiters,
   perRouteLimiters,
@@ -300,6 +317,9 @@ app.use((req, res, next) =>
 app.use(requestLifecycleMiddleware());
 app.use("/agent", requireApiKey);
 app.use("/agent/audit", auditRouter);
+app.use("/agent/push-tokens", pushTokenRouter);
+app.use("/agent/transactions/:txId/order-status", orderStatusRouter);
+app.use("/agent/order-status-webhook", pharmacyWebhookRouter);
 
 // --- Prometheus metrics ---
 app.get("/metrics", metricsHandler());
@@ -789,12 +809,40 @@ app.post(
         ...lineItem,
         description: sanitizeUserString(lineItem.description),
       }));
-      res.json(
-        auditBill(sanitizedLineItems, {
-          network: NETWORK,
-          payTo: process.env.BILL_PROVIDER_PUBLIC_KEY,
-        }),
-      );
+      const providerId =
+        validatedBody.providerId || (req.body?.provider_id as string | undefined);
+      const providerName =
+        validatedBody.providerName || (req.body?.provider_name as string | undefined);
+      const historyStore = getProviderBillHistoryStore();
+      let providerHistoryLookup;
+      if (providerId) {
+        providerHistoryLookup = (cptCode: string, chargedAmount: number) => {
+          return historyStore.compareAgainstHistory({
+            providerId,
+            providerName,
+            cptCode,
+            currentChargedAmount: chargedAmount,
+          });
+        };
+      }
+
+      const auditResult = auditBill(sanitizedLineItems, {
+        network: NETWORK,
+        payTo: process.env.BILL_PROVIDER_PUBLIC_KEY,
+        providerHistoryLookup,
+      });
+
+      if (providerId) {
+        historyStore.recordBillCharges({
+          providerId,
+          providerName: providerName || "Healthcare Provider",
+          recipientId:
+            validatedBody.recipientId || (req.body?.recipient_id as string | undefined),
+          lineItems: sanitizedLineItems,
+        });
+      }
+
+      res.json(auditResult);
     } catch (error) {
       if (error instanceof BillAuditValidationError) {
         const validationError = error as BillAuditValidationError;
@@ -1125,20 +1173,16 @@ app.post(
       "agent task received",
     );
     try {
-      const result = await agentQueue.enqueue(
-        () =>
-          runAgent({
-            task,
-            profile: _profileData,
-            llm,
-            model: LLM_MODEL,
-            maxIterations: MAX_AGENT_ITERATIONS,
-            maxToolCallsPerRun: MAX_TOOL_CALLS_PER_RUN,
-            piiScrub: _piiScrub,
-          }),
-        (queueWaitMs) => {
-          res.setHeader("Server-Timing", `agent-queue;dur=${queueWaitMs.toFixed(2)}`);
-        },
+      const result = await agentQueue.enqueue(() =>
+        runAgent({
+          task,
+          profile: _profileData,
+          llm,
+          model: LLM_MODEL,
+          maxIterations: MAX_AGENT_ITERATIONS,
+          maxToolCallsPerRun: MAX_TOOL_CALLS_PER_RUN,
+          piiScrub: _piiScrub,
+        }),
       );
       agentRunsTotal.inc({ status: "success" });
       logger.info(
@@ -1226,6 +1270,89 @@ app.post("/agent/price-watch/run", async (req, res) => {
     res.json(result);
   } catch (err: any) {
     res.status(500).json({ error: err?.message || "Price watch failed" });
+  }
+});
+
+// --- Multisig endpoints (#1226) ---
+app.get("/agent/multisig/config", (req, res) => {
+  const recipientId = (req.query.recipient_id as string) || (req.query.recipientId as string) || "rosa";
+  res.json(loadMultisigConfig(recipientId));
+});
+
+app.post("/agent/multisig/config", (req, res) => {
+  const recipientId = (req.query.recipient_id as string) || (req.body.recipientId as string) || "rosa";
+  const { enabled, thresholdAmount, coSigners, timeWindowHours } = req.body ?? {};
+  const current = loadMultisigConfig(recipientId);
+  const updated = {
+    recipientId,
+    enabled: typeof enabled === "boolean" ? enabled : current.enabled,
+    thresholdAmount: typeof thresholdAmount === "number" ? thresholdAmount : current.thresholdAmount,
+    coSigners: Array.isArray(coSigners) ? coSigners : current.coSigners,
+    timeWindowHours: typeof timeWindowHours === "number" ? timeWindowHours : current.timeWindowHours,
+  };
+  saveMultisigConfig(updated, recipientId);
+  res.json({ success: true, config: updated });
+});
+
+app.get("/agent/multisig/pending", (req, res) => {
+  const recipientId = (req.query.recipient_id as string) || (req.query.recipientId as string) || "rosa";
+  const requests = loadMultisigRequests(recipientId);
+  res.json({ requests, count: requests.length, recipientId });
+});
+
+app.post("/agent/multisig/sign", async (req, res) => {
+  const { requestId, signerSecretOrSignedXdr, recipientId = "rosa" } = req.body ?? {};
+  if (!requestId || !signerSecretOrSignedXdr) {
+    return res.status(400).json({ error: "requestId and signerSecretOrSignedXdr are required" });
+  }
+  try {
+    const result = await signAndSubmitMultisigRequest(requestId, signerSecretOrSignedXdr, recipientId);
+    res.json(result);
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || "Failed to sign multisig request" });
+  }
+});
+
+app.post("/agent/multisig/reject", (req, res) => {
+  const { requestId, reason, recipientId = "rosa" } = req.body ?? {};
+  if (!requestId) {
+    return res.status(400).json({ error: "requestId is required" });
+  }
+  try {
+    const result = rejectMultisigRequest(requestId, reason, recipientId);
+    res.json(result);
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || "Failed to reject multisig request" });
+  }
+});
+
+// --- Medication Dosage History endpoints (#1227) ---
+app.get("/agent/medications/history", (req, res) => {
+  const recipientId = (req.query.recipient_id as string) || (req.query.recipientId as string) || "rosa";
+  const medicationName = (req.query.medication_name as string) || (req.query.medicationName as string) || undefined;
+  const history = getMedicationHistory(recipientId, medicationName);
+  res.json({ history, recipientId });
+});
+
+app.post("/agent/medications/dosage", (req, res) => {
+  const { recipientId = "rosa", medicationName, newDosage, newFrequency, reason, prescriber } = req.body ?? {};
+  if (!medicationName || !newDosage || !newFrequency) {
+    return res.status(400).json({ error: "medicationName, newDosage, and newFrequency are required" });
+  }
+  try {
+    const entry = recordDosageChange(
+      {
+        medicationName,
+        newDosage,
+        newFrequency,
+        reason,
+        prescriber,
+      },
+      recipientId,
+    );
+    res.status(201).json({ success: true, entry });
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || "Failed to record dosage change" });
   }
 });
 
@@ -1375,7 +1502,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       "CareGuard Unified Server started",
     );
     await startWalletBalanceScheduler();
-    await startPriceWatchScheduler();
+    startOrderStatusReminderCron();
   });
 
   gracefulShutdown({

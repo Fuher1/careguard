@@ -94,6 +94,7 @@
     "sonner": "^2.0.7",
     "tailwindcss": "^4.3.1",
     "tsx": "^4.23.12",
+    "viem": "^2.57.7",
     "zod": "^4.0.0"
   },
   "devDependencies": {

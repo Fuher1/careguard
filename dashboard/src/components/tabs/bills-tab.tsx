@@ -12,6 +12,7 @@ import {
   type DisputeLetter,
   type ItemPresenceMap,
   type CaregiverProfile,
+  type ConsentSettings,
 } from "../../lib/types";
 import { BillLineItemsVirtualized } from "../primitives/bill-line-items-virtualized";
 import { sanitizeAnnotation } from "../../lib/sanitize";
@@ -34,6 +35,7 @@ export interface BillsTabProps {
   locale?: Locale;
   currentCaregiver?: CaregiverProfile;
   linkedCaregivers?: CaregiverProfile[];
+  consentSettings?: ConsentSettings;
 }
 
 /**
@@ -158,6 +160,47 @@ export function BillsTab({ agentResult, recipient }: BillsTabProps) {
                   </button>
                   {t.result.errorCount > 0 && (
                     <>
+                      <select
+                        aria-label="Dispute reason template"
+                        value={selectedTemplate}
+                        onChange={(e) => {
+                          const nextTpl = e.target.value as DisputeReasonTemplate;
+                          setSelectedTemplate(nextTpl);
+                          setCustomLetterBody((prev) => ({
+                            ...prev,
+                            [auditCallKey(tc)]: generateDisputeText(tc.result, recipient, nextTpl),
+                          }));
+                        }}
+                        className="text-xs px-2 py-1 border border-slate-300 rounded-lg bg-white text-slate-700 focus:outline-none focus:ring-1 focus:ring-sky-500"
+                      >
+                        <option value="duplicate_charge">Duplicate Billing (CMS Ch. 1 § 80.3.2)</option>
+                        <option value="coding_error">Coding Discrepancy / Upcoding (AMA CPT)</option>
+                        <option value="balance_billing">Balance Billing (No Surprises Act 45 CFR § 149)</option>
+                        <option value="unbundling">Unbundled Service Charges (CMS NCCI)</option>
+                        <option value="general_dispute">General Discrepancy & Fair-Market Audit</option>
+                      </select>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const key = auditCallKey(tc);
+                          if (editingAuditKey === key) {
+                            setEditingAuditKey(null);
+                          } else {
+                            setEditingAuditKey(key);
+                            if (!customLetterBody[key]) {
+                              setCustomLetterBody((prev) => ({
+                                ...prev,
+                                [key]: generateDisputeText(tc.result, recipient, selectedTemplate),
+                              }));
+                            }
+                          }
+                        }}
+                        className="px-2.5 py-1.5 bg-slate-100 text-slate-700 rounded-lg text-xs font-medium hover:bg-slate-200 cursor-pointer transition-all"
+                      >
+                        {editingAuditKey === auditCallKey(tc) ? "Hide Preview" : "Preview & Edit"}
+                      </button>
+
                       <button
                         onClick={() => handleDispute(t.result, i)}
                         disabled={generatingDispute === `dispute-${i}`}

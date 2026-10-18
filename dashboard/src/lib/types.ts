@@ -70,9 +70,36 @@ export const TransactionSchema = z.object({
   pendingUntil: z.string().optional(),
   status: z.string(),
   category: z.string(),
+  // Optional caregiver-authored memo for record-keeping (Feature: payment memo).
+  memo: z.string().optional(),
+  // Medication order fulfilment lifecycle (Feature: order tracking).
+  order_status: z.enum(["submitted", "ready", "picked_up"]).optional(),
+  order_status_history: z
+    .array(
+      z.object({
+        status: z.enum(["submitted", "ready", "picked_up"]),
+        timestamp: z.string(),
+        updatedBy: z.string(),
+      }),
+    )
+    .optional(),
 });
 
 export type Transaction = z.infer<typeof TransactionSchema>;
+
+export const ORDER_STATUS = {
+  SUBMITTED: "submitted",
+  READY: "ready",
+  PICKED_UP: "picked_up",
+} as const;
+
+export const ORDER_STATUSES = [
+  ORDER_STATUS.SUBMITTED,
+  ORDER_STATUS.READY,
+  ORDER_STATUS.PICKED_UP,
+] as const;
+
+export type OrderStatus = (typeof ORDER_STATUSES)[number];
 
 export const AuditLogSchema = z.object({
   timestamp: z.string(),
@@ -82,6 +109,14 @@ export const AuditLogSchema = z.object({
 });
 
 export type AuditLogEvent = z.infer<typeof AuditLogSchema>;
+
+export const CategoryTotalsSchema = z.object({
+  medications: z.number(),
+  bills: z.number(),
+  serviceFees: z.number(),
+  total: z.number(),
+  count: z.number(),
+});
 
 export const SpendingDataSchema = z.object({
   policy: z.object({
@@ -105,9 +140,18 @@ export const SpendingDataSchema = z.object({
   }),
   transactionCount: z.number(),
   recentTransactions: z.array(TransactionSchema),
+  // #1185: per-category totals per range. Optional so older agents still parse.
+  categoryBreakdown: z
+    .object({
+      "7d": CategoryTotalsSchema,
+      "30d": CategoryTotalsSchema,
+      all: CategoryTotalsSchema,
+    })
+    .optional(),
 });
 
 export type SpendingData = z.infer<typeof SpendingDataSchema>;
+export type CategoryTotals = z.infer<typeof CategoryTotalsSchema>;
 
 export type RecipientProfile = {
   name: string;
@@ -257,3 +301,61 @@ export const HandoffNoteSchema = z.object({
 });
 
 export type HandoffNote = z.infer<typeof HandoffNoteSchema>;
+
+// ── Granular Data-Sharing Consent (#1218) ─────────────────────────────────────
+
+export interface RoleConsent {
+  medications: boolean;
+  bills: boolean;
+  wallet: boolean;
+}
+
+export interface ConsentSettings {
+  owner: RoleConsent;
+  "co-caregiver": RoleConsent;
+  viewer: RoleConsent;
+}
+
+export const DEFAULT_CONSENT_SETTINGS: ConsentSettings = {
+  owner: { medications: true, bills: true, wallet: true },
+  "co-caregiver": { medications: true, bills: true, wallet: true },
+  viewer: { medications: true, bills: true, wallet: true },
+};
+
+// ── Cost Splitting Ledger (#1220) ───────────────────────────────────────────
+
+export interface CostSplitShare {
+  caregiverId: string;
+  caregiverName: string;
+  amount: number;
+  status: "owed" | "settled";
+  settledAt?: string;
+  settledBy?: string;
+}
+
+export interface CostSplit {
+  id: string;
+  transactionId: string;
+  recipientId: string;
+  totalAmount: number;
+  payerId: string;
+  payerName: string;
+  description?: string;
+  shares: CostSplitShare[];
+  createdAt: string;
+}
+
+export interface ContributorBalance {
+  fromCaregiverId: string;
+  fromCaregiverName: string;
+  toCaregiverId: string;
+  toCaregiverName: string;
+  amount: number;
+}
+
+export interface ContributorBalanceSummary {
+  balances: ContributorBalance[];
+  totalOwed: number;
+  totalSettled: number;
+}
+

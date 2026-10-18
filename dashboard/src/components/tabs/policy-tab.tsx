@@ -11,6 +11,7 @@ import { POLICY_FIELD_T_KEY as FIELD_T_KEY } from "../../lib/policy-field-labels
 import type { SpendingData } from "../types";
 import { Bar } from "../primitives/bar";
 import { Toast } from "../primitives/toast";
+import { ContextualHelp } from "../primitives/contextual-help";
 import { getTranslations, type Locale } from "../../i18n";
 import { agentFetch } from "../../lib/agent-fetch";
 
@@ -36,7 +37,7 @@ const FIELD_HELPERS: Record<string, string> = {
 /** Per-field HTML input constraints — kept in sync with schemas.ts (#211). */
 const FIELD_CONFIG: Record<
   keyof SpendingPolicyInput,
-  { min: number; max: number; step: number }
+  { min?: number; max?: number; step?: number }
 > = {
   dailyLimit: { min: 1, max: 50000, step: 1 },
   monthlyLimit: { min: 1, max: 50000, step: 1 },
@@ -307,9 +308,12 @@ export function PolicyTab({
       tabIndex={0}
       className="bg-white rounded-xl border border-slate-200 p-6 max-w-lg"
     >
-      <h2 className="text-sm font-semibold text-slate-700 mb-4">
-        {t.policy.title.replace("Rosa", recipient.name)}
-      </h2>
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="text-sm font-semibold text-slate-700 flex items-center">
+          {t.policy.title.replace("Rosa", recipient.name)}
+          <ContextualHelp topicKey="policy_block" caregiverId="caregiver" />
+        </h2>
+      </div>
       <p className="text-xs text-slate-500 mb-6">
         These limits are enforced server-side by the CareGuard agent before
         every payment.
@@ -327,7 +331,15 @@ export function PolicyTab({
                 htmlFor={inputId}
                 className="block text-xs font-medium text-slate-600 mb-1"
               >
-                {label}
+                <span className="inline-flex items-center">
+                  {label}
+                  {key === "approvalThreshold" && (
+                    <ContextualHelp topicKey="approval_threshold" caregiverId="caregiver" />
+                  )}
+                  {key === "dailyLimit" && (
+                    <ContextualHelp topicKey="policy_block" caregiverId="caregiver" />
+                  )}
+                </span>
               </label>
               <input
                 id={inputId}
@@ -350,13 +362,14 @@ export function PolicyTab({
                   if (debounceRef.current) clearTimeout(debounceRef.current);
                   debounceRef.current = setTimeout(() => {
                     setPolicyForm((p) => ({ ...p, [key]: parsed }));
-                  }, 300);
-                }}
-                className={`w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 ${errMsg
-                    ? "border-red-400 focus:ring-red-500"
-                    : "border-slate-300 focus:ring-sky-500"
+                  }}
+                  className={`w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 ${
+                    errMsg
+                      ? "border-red-400 focus:ring-red-500"
+                      : "border-slate-300 focus:ring-sky-500"
                   }`}
-              />
+                />
+              )}
               {errMsg && (
                 <p id={errorId} className="mt-1 text-xs text-red-600">
                   {errMsg}
@@ -541,6 +554,9 @@ export function PolicyTab({
               {impactState?.status === "ready" && (
                 <>
                   <p className="text-slate-700">{describePolicyImpact(impactState.impact)}</p>
+                  {impactState.impact.newlyBlocked > 0 && (
+                    <ContextualHelp topicKey="policy_block" variant="inline" className="mt-2 mb-2" />
+                  )}
                   {impactState.impact.entries.some((e) => e.changed) && (
                     <ul className="mt-2 space-y-1">
                       {impactState.impact.entries

@@ -190,12 +190,13 @@ export function useAgentState({ activeTab }: UseAgentStateOptions) {
       setLiveMessage("Agent disconnected");
   }, [agentConnected, agentPaused]);
 
-  const addLogEntry = useCallback((message: string) => {
+  const addLogEntry = useCallback((message: string, errorDetail?: string) => {
     setAgentLog((prev) => {
       const entry: AgentLogEntry = {
         id: `${Date.now()}-${Math.random()}`,
         timestamp: Date.now(),
         message,
+        errorDetail,
       };
       const next = [...prev, entry];
       return next.length > 200 ? next.slice(-200) : next;

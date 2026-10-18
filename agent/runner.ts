@@ -91,7 +91,11 @@ export interface RunAgentOptions {
 
 export interface RunAgentResult {
   response: string;
-  toolCalls: Array<{ id: string; tool: string; input: Record<string, unknown>; result: ToolResult }>;
+  toolCalls: Array<{
+    tool: string;
+    input: Record<string, unknown>;
+    result: ToolResult;
+  }>;
   spending: ReturnType<typeof getSpendingSummary>;
   llmUsage: { promptTokens: number; completionTokens: number };
   truncated: boolean;
@@ -101,7 +105,10 @@ export interface RunAgentResult {
 
 // ── System prompt ──────────────────────────────────────────────────────────────
 
-export function buildSystemPrompt(profile: AgentProfile, caregiverName: string): string {
+export function buildSystemPrompt(
+  profile: AgentProfile,
+  caregiverName: string,
+): string {
   const meds = (profile.recipient.medications ?? []).join(", ");
   return `You are CareGuard, an AI agent that manages healthcare spending for elderly care recipients on the Stellar blockchain. You work on behalf of a family caregiver to ensure their loved ones get the best prices on medications and catches errors in medical bills.
 
@@ -142,21 +149,25 @@ Use recipient_id parameter when making tool calls that support it.`;
 
 // ── LLM tool definitions ───────────────────────────────────────────────────────
 
-export const LLM_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = TOOL_DEFINITIONS.map((t) => ({
-  type: "function" as const,
-  function: {
-    name: t.name,
-    description: t.description,
-    parameters: {
-      ...t.input_schema,
-      additionalProperties: false,
+export const LLM_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] =
+  TOOL_DEFINITIONS.map((t) => ({
+    type: "function" as const,
+    function: {
+      name: t.name,
+      description: t.description,
+      parameters: {
+        ...t.input_schema,
+        additionalProperties: false,
+      },
     },
-  },
-}));
+  }));
 
 // ── executeTool ───────────────────────────────────────────────────────────────
 
-export async function executeTool(name: string, input: Record<string, unknown>): Promise<ToolResult> {
+export async function executeTool(
+  name: string,
+  input: Record<string, unknown>,
+): Promise<ToolResult> {
   try {
     input = validateToolInput(name, input);
     let result: any;
@@ -173,6 +184,7 @@ export async function executeTool(name: string, input: Record<string, unknown>):
     const provName = input.provider_name as string | undefined;
     const desc = input.description as string | undefined;
     const cat = input.category as string | undefined;
+    const memo = input.memo as string | undefined;
 
     switch (name) {
       case "compare_pharmacy_prices":
@@ -197,7 +209,11 @@ export async function executeTool(name: string, input: Record<string, unknown>):
         } else {
           items = input.line_items || input.line_items_json;
         }
-        result = await auditBill(items);
+        result = await auditBill(items, {
+          providerId: (input.provider_id as string) || provId,
+          providerName: (input.provider_name as string) || provName,
+          recipientId: rid,
+        });
         break;
       }
       case "fetch_rosa_bill":
@@ -229,10 +245,29 @@ export async function executeTool(name: string, input: Record<string, unknown>):
         );
         break;
       case "pay_for_medication":
-        result = await payForMedication(pharmId || "", pharmName || "", drugN || "", amt);
+        result = await payForMedication(
+          pharmId || "",
+          pharmName || "",
+          drugN || "",
+          amt,
+          Boolean(input.skip_approval),
+          Number(input.days_supply ?? 30),
+          memo,
+          rid,
+          input.cost_split as any,
+        );
         break;
       case "pay_bill":
-        result = await payBill(provId || "", provName || "", desc || "", amt);
+        result = await payBill(
+          provId || "",
+          provName || "",
+          desc || "",
+          amt,
+          Boolean(input.skip_approval),
+          memo,
+          rid,
+          input.cost_split as any,
+        );
         break;
       case "check_spending_policy":
         result = checkSpendingPolicy(amt, cat as "medications" | "bills");
@@ -249,7 +284,11 @@ export async function executeTool(name: string, input: Record<string, unknown>):
           try {
             auditResult = JSON.parse(input.audit_result_json);
           } catch (e: any) {
-            return { ok: false, reason: "INVALID_AUDIT_RESULT_JSON", error: e.message };
+            return {
+              ok: false,
+              reason: "INVALID_AUDIT_RESULT_JSON",
+              error: e.message,
+            };
           }
         } else {
           auditResult = input.audit_result_json;
@@ -264,6 +303,8 @@ export async function executeTool(name: string, input: Record<string, unknown>):
             caregiverName: input.caregiver_name as string,
             caregiverEmail: input.caregiver_email as string,
           },
+          input.reason as any,
+          rid,
         );
         break;
       }
@@ -301,7 +342,8 @@ function calculateMaxTokens(
   maxTokensSummary: number,
 ): number {
   if (iteration === 0) return maxTokensSimple;
-  if (previousToolResultCount > 0 && previousToolResultCount <= 3) return maxTokensToolResult;
+  if (previousToolResultCount > 0 && previousToolResultCount <= 3)
+    return maxTokensToolResult;
   if (previousToolResultCount > 3) return maxTokensSimple;
   if (iteration > 8) return maxTokensSummary;
   return maxTokensSimple;
@@ -332,7 +374,9 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
     ? buildScrubSession([profile.recipient.name], [profile.caregiver.name])
     : null;
   const userTask = scrubSession ? scrubText(task, scrubSession) : task;
-  const scrubbedSystemPrompt = scrubSession ? scrubText(systemPrompt, scrubSession) : systemPrompt;
+  const scrubbedSystemPrompt = scrubSession
+    ? scrubText(systemPrompt, scrubSession)
+    : systemPrompt;
   const runId = `run-${getRequestId() ?? Date.now()}`;
   setAgentRunId(runId);
 
@@ -341,7 +385,11 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
     { role: "user", content: userTask },
   ];
 
-  const toolCalls: Array<{ id: string; tool: string; input: Record<string, unknown>; result: ToolResult }> = [];
+  const toolCalls: Array<{
+    tool: string;
+    input: Record<string, unknown>;
+    result: ToolResult;
+  }> = [];
   let finalResponse = "";
   let llmUsage = { promptTokens: 0, completionTokens: 0 };
   let runToolCalls = 0;
@@ -353,8 +401,11 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
   for (; iteration < maxIterations; iteration++) {
     let response;
     try {
-      const isToolCallRound = toolCalls.length > 0 || iteration < maxIterations - 1;
-      const temperature = isToolCallRound ? llmToolTemperature : llmSummaryTemperature;
+      const isToolCallRound =
+        toolCalls.length > 0 || iteration < maxIterations - 1;
+      const temperature = isToolCallRound
+        ? llmToolTemperature
+        : llmSummaryTemperature;
       const maxTokens = calculateMaxTokens(
         iteration,
         maxIterations,
@@ -379,23 +430,39 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
 
       llmError = { message: llmErr.message, code: llmErr.code, iteration };
 
-      const partialSummary = toolCalls.length > 0
-        ? toolCalls.map((tc) => {
-            if (tc.result?.error) return `${tc.tool}: ${tc.result.error}`;
-            if (tc.result?.ok === false && (tc.result as any)?.reason) return `${tc.tool}: ${(tc.result as any).reason}`;
-            if (tc.tool === "compare_pharmacy_prices" && (tc.result as any)?.cheapest)
-              return `${(tc.result as any).drug}: cheapest at $${(tc.result as any).cheapest.price} (${(tc.result as any).cheapest.pharmacyName}), save $${(tc.result as any).potentialSavings}/mo`;
-            if (tc.tool === "audit_medical_bill" && (tc.result as any)?.totalOvercharge)
-              return `Bill audit: $${(tc.result as any).totalOvercharge} in overcharges found (${(tc.result as any).errorCount} errors)`;
-            if (tc.tool === "check_drug_interactions" && (tc.result as any)?.summary)
-              return (tc.result as any).summary;
-            if (tc.tool === "pay_for_medication" && (tc.result as any)?.success)
-              return `Paid $${(tc.result as any).transaction.amount} for ${(tc.result as any).transaction.description}`;
-            if (tc.tool === "pay_bill" && (tc.result as any)?.success)
-              return `Paid bill: $${(tc.result as any).transaction.amount}`;
-            return `${tc.tool}: completed`;
-          }).join("\n")
-        : `LLM error: ${llmErr.message}`;
+      const partialSummary =
+        toolCalls.length > 0
+          ? toolCalls
+              .map((tc) => {
+                if (tc.result?.error) return `${tc.tool}: ${tc.result.error}`;
+                if (tc.result?.ok === false && (tc.result as any)?.reason)
+                  return `${tc.tool}: ${(tc.result as any).reason}`;
+                if (
+                  tc.tool === "compare_pharmacy_prices" &&
+                  (tc.result as any)?.cheapest
+                )
+                  return `${(tc.result as any).drug}: cheapest at $${(tc.result as any).cheapest.price} (${(tc.result as any).cheapest.pharmacyName}), save $${(tc.result as any).potentialSavings}/mo`;
+                if (
+                  tc.tool === "audit_medical_bill" &&
+                  (tc.result as any)?.totalOvercharge
+                )
+                  return `Bill audit: $${(tc.result as any).totalOvercharge} in overcharges found (${(tc.result as any).errorCount} errors)`;
+                if (
+                  tc.tool === "check_drug_interactions" &&
+                  (tc.result as any)?.summary
+                )
+                  return (tc.result as any).summary;
+                if (
+                  tc.tool === "pay_for_medication" &&
+                  (tc.result as any)?.success
+                )
+                  return `Paid $${(tc.result as any).transaction.amount} for ${(tc.result as any).transaction.description}`;
+                if (tc.tool === "pay_bill" && (tc.result as any)?.success)
+                  return `Paid bill: $${(tc.result as any).transaction.amount}`;
+                return `${tc.tool}: completed`;
+              })
+              .join("\n")
+          : `LLM error: ${llmErr.message}`;
 
       finalResponse = `⚠ LLM error at iteration ${iteration} — results below are partial\n\n${partialSummary}`;
       break;
@@ -410,11 +477,26 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
       agentLlmTokensTotal.inc({ kind: "completion" }, completionTokens);
       agentLlmIterationTokens.set({ kind: "prompt" }, promptTokens);
       agentLlmIterationTokens.set({ kind: "completion" }, completionTokens);
-      agentLlmIterationTokens.set({ kind: "total" }, promptTokens + completionTokens);
-      const usageRatio = llmContextWindow > 0 ? (promptTokens + completionTokens) / llmContextWindow : 0;
+      agentLlmIterationTokens.set(
+        { kind: "total" },
+        promptTokens + completionTokens,
+      );
+      const usageRatio =
+        llmContextWindow > 0
+          ? (promptTokens + completionTokens) / llmContextWindow
+          : 0;
       agentLlmContextUsageRatio.set(usageRatio);
       if (usageRatio >= 0.8) {
-        logger.warn({ iteration, promptTokens, completionTokens, usageRatio, llmContextWindow }, "LLM context usage reached 80% of the configured window");
+        logger.warn(
+          {
+            iteration,
+            promptTokens,
+            completionTokens,
+            usageRatio,
+            llmContextWindow,
+          },
+          "LLM context usage reached 80% of the configured window",
+        );
       }
     }
 
@@ -438,7 +520,8 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
         actor: "agent",
         details: { max: maxToolCallsPerRun, ran: runToolCalls },
       });
-      finalResponse = finalResponse || "Tool call limit reached; partial results returned.";
+      finalResponse =
+        finalResponse || "Tool call limit reached; partial results returned.";
       break;
     }
     runToolCalls += message.tool_calls.length;
@@ -453,7 +536,10 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
         fnArgs = {};
       }
 
-      logger.info({ tool: fnName, args: JSON.stringify(fnArgs).slice(0, 100) }, "tool call");
+      logger.info(
+        { tool: fnName, args: JSON.stringify(fnArgs).slice(0, 100) },
+        "tool call",
+      );
 
       onProgress?.({ tool: fnName, iteration });
 
@@ -473,7 +559,9 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
         details: {
           tool: fnName,
           inputs: fnArgs,
-          resultHash: createHash("sha256").update(JSON.stringify(result || {})).digest("hex"),
+          resultHash: createHash("sha256")
+            .update(JSON.stringify(result || {}))
+            .digest("hex"),
         },
       });
 

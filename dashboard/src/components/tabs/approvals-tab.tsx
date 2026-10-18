@@ -1,11 +1,11 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import type { Transaction, CaregiverProfile } from "../types";
+import type { Transaction } from "../types";
 import { formatDateTime, type Locale, getTranslations } from "../../i18n";
 import { AGENT_URL } from "../../lib/agent-url";
 import { agentFetch } from "../../lib/agent-fetch";
-import type { ItemPresenceMap } from "../../lib/types";
+import type { ItemPresenceMap, CaregiverProfile } from "../../lib/types";
 
 /** Who is deciding, and whose authority they use when delegated (#1195). */
 export interface ApprovalActor {
@@ -189,6 +189,7 @@ export function ApprovalsTab({
                   )
                 : [];
               const latestCoViewer = coViewers[coViewers.length - 1];
+              const isExceptionRequest = Boolean((tx as any).type === "exception" || (tx as any).reason);
 
               return (
                 <div
@@ -216,8 +217,17 @@ export function ApprovalsTab({
                         )}
                       </div>
                       <div className="text-xs text-slate-500 mt-1">
-                        Amount: ${tx.amount.toFixed(2)} | Category: {tx.category}
+                        {isExceptionRequest ? (
+                          <span>Request exception • Amount: ${tx.amount.toFixed(2)} | Category: {tx.category}</span>
+                        ) : (
+                          <span>Amount: ${tx.amount.toFixed(2)} | Category: {tx.category}</span>
+                        )}
                       </div>
+                      {isExceptionRequest && (
+                        <div className="text-xs text-amber-700 mt-1 font-medium">
+                          {(tx as any).reason || "Unexpected specialist bill requires caregiver approval."}
+                        </div>
+                      )}
                       <div className="text-xs text-slate-400 mt-1">
                         {formatDateTime(new Date(tx.timestamp), locale)}
                       </div>
@@ -271,14 +281,14 @@ export function ApprovalsTab({
                         disabled={loading}
                         className="px-3 py-1.5 bg-green-600 text-white text-xs font-medium rounded-lg hover:bg-green-700 disabled:opacity-50 cursor-pointer"
                       >
-                        Approve
+                        {isExceptionRequest ? "Approve exception" : "Approve"}
                       </button>
                       <button
                         onClick={() => (actor ? onCancel(tx.id, actor) : onCancel(tx.id))}
                         disabled={loading}
                         className="px-3 py-1.5 bg-red-600 text-white text-xs font-medium rounded-lg hover:bg-red-700 disabled:opacity-50 cursor-pointer"
                       >
-                        Cancel
+                        {isExceptionRequest ? "Deny exception" : "Cancel"}
                       </button>
                     </div>
                   </div>

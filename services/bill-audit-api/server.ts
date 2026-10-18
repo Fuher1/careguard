@@ -22,6 +22,7 @@ import {
   type LineItem,
   validateBillAuditRequest,
 } from "../../shared/bill-audit.ts";
+import { getProviderBillHistoryStore } from "./history.ts";
 import {
   applyX402Middleware,
   NETWORK,
@@ -209,8 +210,24 @@ interface BillItem {
   chargedAmount: number;
 }
 
-export function auditBill(lineItems: BillItem[]) {
-  return sharedAuditBill(lineItems, {
+export function auditBill(
+  lineItems: BillItem[],
+  options?: { providerId?: string; providerName?: string; recipientId?: string },
+) {
+  const historyStore = getProviderBillHistoryStore();
+  let providerHistoryLookup;
+  if (options?.providerId) {
+    providerHistoryLookup = (cptCode: string, chargedAmount: number) => {
+      return historyStore.compareAgainstHistory({
+        providerId: options.providerId!,
+        providerName: options.providerName,
+        cptCode,
+        currentChargedAmount: chargedAmount,
+      });
+    };
+  }
+
+  const result = sharedAuditBill(lineItems, {
     network: NETWORK,
     payTo: PAY_TO,
     duplicateAllowlist,
@@ -220,7 +237,19 @@ export function auditBill(lineItems: BillItem[]) {
     upcodedMultiplier: BILL_AUDIT_UPCODED_MULTIPLIER,
     ratesAsOf: RATES_AS_OF,
     ratesValidUntil: RATES_VALID_UNTIL,
+    providerHistoryLookup,
   });
+
+  if (options?.providerId) {
+    historyStore.recordBillCharges({
+      providerId: options.providerId,
+      providerName: options.providerName || "Healthcare Provider",
+      recipientId: options.recipientId,
+      lineItems,
+    });
+  }
+
+  return result;
 }
 
 export const app = express();
@@ -354,7 +383,13 @@ app.post("/bill/audit", (req, res) => {
       ...item,
       description: sanitizeUserString(item.description),
     }));
-    res.json(auditBill(sanitizedLineItems));
+    res.json(
+      auditBill(sanitizedLineItems, {
+        providerId: validatedData.providerId,
+        providerName: validatedData.providerName,
+        recipientId: validatedData.recipientId,
+      }),
+    );
   } catch (error) {
     if (error instanceof BillAuditValidationError) {
       const validationError = error as BillAuditValidationError;

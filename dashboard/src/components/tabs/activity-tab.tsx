@@ -344,6 +344,46 @@ export function ActivityTab({
               </button>
             </>
           )}
+          {allTransactions.length > 0 && (
+            <button
+              onClick={() => {
+                // CSV export: transactions with memo column
+                const header =
+                  "Time,Type,Description,Memo,Amount,Status,Stellar Tx\n";
+                const rows = allTransactions
+                  .map((tx) =>
+                    [
+                      new Date(tx.timestamp).toLocaleString(),
+                      tx.type,
+                      `"${tx.description.replace(/"/g, '""')}"`,
+                      `"${(tx.memo ?? "").replace(/"/g, '""')}"`,
+                      tx.amount.toFixed(2),
+                      tx.status,
+                      tx.stellarTxHash ?? "",
+                    ].join(","),
+                  )
+                  .join("\n");
+                const blob = new Blob([header + rows], { type: "text/csv" });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement("a");
+                a.href = url;
+                a.download = "careguard-transactions.csv";
+                a.click();
+                URL.revokeObjectURL(url);
+              }}
+              className="px-3 py-1.5 bg-slate-50 text-slate-600 rounded-lg text-xs font-medium hover:bg-slate-100 active:bg-slate-200 cursor-pointer transition-all"
+            >
+              Export CSV
+            </button>
+          )}
+          {auditEvents.length > 0 && (
+            <button
+              onClick={() => downloadAuditLogPDF(auditEvents, { recipient })}
+              className="px-3 py-1.5 bg-violet-50 text-violet-700 rounded-lg text-xs font-medium hover:bg-violet-100 active:bg-violet-200 cursor-pointer transition-all"
+            >
+              Audit Report
+            </button>
+          )}
           <button
             onClick={() => setAgentLog([])}
             title={t.clearLogTitle}
@@ -595,11 +635,17 @@ export function ActivityTab({
                     <th className="text-left px-4 py-2 text-xs font-medium text-slate-500">
                       {t.description}
                     </th>
+                    <th className="hidden lg:table-cell text-left px-4 py-2 text-xs font-medium text-slate-500">
+                      Memo
+                    </th>
                     <th className="text-right px-4 py-2 text-xs font-medium text-slate-500">
                       {t.amount}
                     </th>
                     <th className="text-right px-4 py-2 text-xs font-medium text-slate-500">
                       {t.status}
+                    </th>
+                    <th className="hidden sm:table-cell text-right px-4 py-2 text-xs font-medium text-slate-500">
+                      Order
                     </th>
                     <th className="text-right px-4 py-2 text-xs font-medium text-slate-500">
                       {t.stellarTx}
@@ -675,6 +721,10 @@ export function ActivityTab({
                           </span>
                         </td>
                         <td className="px-4 py-2 text-xs">{tx.description}</td>
+                        {/* Memo — only shown on large screens; empty dash if not set */}
+                        <td className="hidden lg:table-cell px-4 py-2 text-xs text-slate-500 italic">
+                          {tx.memo ?? "-"}
+                        </td>
                         <td className="px-4 py-2 text-right text-xs font-mono">
                           $
                           {tx.amount < 0.01
@@ -689,6 +739,28 @@ export function ActivityTab({
                               (tx as { blockReason?: string }).blockReason
                             }
                           />
+                        </td>
+                        {/* Order status badge — only for medication transactions */}
+                        <td className="hidden sm:table-cell px-4 py-2 text-right">
+                          {tx.type === "medication" && tx.order_status ? (
+                            <span
+                              className={`px-2 py-0.5 rounded text-xs font-medium ${
+                                tx.order_status === "picked_up"
+                                  ? "bg-green-100 text-green-700"
+                                  : tx.order_status === "ready"
+                                    ? "bg-amber-100 text-amber-700"
+                                    : "bg-slate-100 text-slate-500"
+                              }`}
+                            >
+                              {tx.order_status === "picked_up"
+                                ? "Picked up"
+                                : tx.order_status === "ready"
+                                  ? "Ready"
+                                  : "Submitted"}
+                            </span>
+                          ) : (
+                            <span className="text-xs text-slate-300">—</span>
+                          )}
                         </td>
                         <td className="px-4 py-2 text-right">
                           <TxLink
