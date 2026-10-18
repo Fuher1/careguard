@@ -118,6 +118,7 @@ import {
 import { executeTool, runAgent } from "./agent/runner.ts";
 import { resolveRequestedDosage } from "./services/pharmacy-api/dosage.ts";
 import { createPharmacyPricingStore } from "./services/pharmacy-api/db.ts";
+import { createPricingProvider } from "./shared/pricing-sources.ts";
 import {
   PRICING_DATABASE,
   getPharmacyPrices,
@@ -460,6 +461,11 @@ app.patch("/agent/profile", (req, res) => {
 const PHARMACY_ADMIN_TOKEN =
   process.env.PHARMACY_ADMIN_TOKEN || CAREGIVER_TOKEN;
 const pharmacyStore = createPharmacyPricingStore();
+// Activated when PHARMACY_PRICING_PROVIDER is set to a non-static value (#1031).
+const externalPricingProvider =
+  process.env.PHARMACY_PRICING_PROVIDER && process.env.PHARMACY_PRICING_PROVIDER !== "static"
+    ? createPricingProvider(process.env.PHARMACY_PRICING_PROVIDER)
+    : null;
 // Shared with the agent's get_handoff_notes tool (#1180).
 const recipientsStore = getCareRecipientsStore();
 
@@ -664,7 +670,11 @@ app.get(
     const dosage = resolveRequestedDosage(drug, query.dosage, recipient);
 
     try {
-      const prices = pharmacyStore.getPrices(drug);
+      // Use the external pricing provider when configured (#1031); fall back to the
+      // SQLite-backed store which holds admin-managed pricing data.
+      const prices = externalPricingProvider
+        ? await externalPricingProvider.getPrices(drug, query.zip)
+        : pharmacyStore.getPrices(drug);
       const isFallbackZip = Boolean(query.zip && query.zip !== DEFAULT_ZIP_CODE);
       const usedZipCode = isFallbackZip ? DEFAULT_ZIP_CODE : (query.zip || DEFAULT_ZIP_CODE);
 
