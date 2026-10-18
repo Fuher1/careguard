@@ -114,6 +114,7 @@ import { createVitalsStore } from "./services/vitals/db.ts";
 import { createVitalsRouter } from "./services/vitals/routes.ts";
 import { getInteractionCheckStore } from "./services/interaction-checks/db.ts";
 import { createInteractionChecksRouter } from "./services/interaction-checks/routes.ts";
+import { createCarePlanRouter } from "./services/care-plan/routes.ts";
 import {
   buildCompareResponse,
   DrugRecordSchema,
@@ -1081,6 +1082,7 @@ app.post("/agent/policy", (req, res) => {
 app.use("/agent", createVitalsRouter(createVitalsStore()));
 // #1193: searchable history of past drug interaction checks.
 app.use("/agent", createInteractionChecksRouter(getInteractionCheckStore()));
+app.use("/agent/care-plan", createCarePlanRouter());
 // #1238: preview a policy change against recent payment history.
 app.post("/agent/policy/preview", (req, res) => {
   const result = SpendingPolicySchema.safeParse(req.body);
