@@ -342,10 +342,11 @@ function calculateMaxTokens(
   maxTokensSummary: number,
 ): number {
   if (iteration === 0) return maxTokensSimple;
+  // Final synthesis iteration: always grant the full summary budget so complex
+  // multi-step runs (>3 tool results) are not silently truncated (#1033).
+  if (iteration >= maxIterations - 1) return maxTokensSummary;
   if (previousToolResultCount > 0 && previousToolResultCount <= 3)
     return maxTokensToolResult;
-  if (previousToolResultCount > 3) return maxTokensSimple;
-  if (iteration > 8) return maxTokensSummary;
   return maxTokensSimple;
 }
 
