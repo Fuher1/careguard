@@ -3,9 +3,67 @@ import { createRequire } from 'module';
 import { createHash, randomBytes, randomUUID } from 'crypto';
 import path from 'path';
 import { logger } from '../../shared/logger.ts';
+import { appendAuditEntry } from '../../shared/audit-log.ts';
+import {
+  type CostSplit,
+  type CostSplitShare,
+  calculateContributorBalances,
+  type ContributorBalanceSummary,
+} from '../../shared/cost-split.ts';
 
 const require = createRequire(import.meta.url);
 const { DatabaseSync } = require('node:sqlite') as typeof import('node:sqlite');
+
+/** Id of the recipient seeded into an empty database. */
+export const DEFAULT_RECIPIENT_ID = 'rosa_garcia';
+
+/** Caregiver roles (#1179), most to least privileged. */
+export const CAREGIVER_ROLES = ['owner', 'co-caregiver', 'viewer'] as const;
+export type CaregiverRole = (typeof CAREGIVER_ROLES)[number];
+
+/**
+ * - view:   read the recipient, its linked caregivers and handoff notes
+ * - act:    day-to-day care actions, e.g. posting handoff notes
+ * - manage: invite and remove caregivers, configure consent
+ */
+export type CaregiverPermission = 'view' | 'act' | 'manage';
+
+const ROLE_PERMISSIONS: Record<CaregiverRole, ReadonlySet<CaregiverPermission>> = {
+  owner: new Set(['view', 'act', 'manage']),
+  'co-caregiver': new Set(['view', 'act']),
+  viewer: new Set(['view']),
+};
+
+export function roleHasPermission(role: CaregiverRole, permission: CaregiverPermission): boolean {
+  return ROLE_PERMISSIONS[role].has(permission);
+}
+
+export const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+export const HANDOFF_NOTE_MAX_LENGTH = 500;
+
+// ── Granular Data-Sharing Consent (#1218) ─────────────────────────────────────
+
+export type ConsentCategory = 'medications' | 'bills' | 'wallet';
+export const CONSENT_CATEGORIES: readonly ConsentCategory[] = ['medications', 'bills', 'wallet'] as const;
+
+export interface RoleConsent {
+  medications: boolean;
+  bills: boolean;
+  wallet: boolean;
+}
+
+export interface ConsentSettings {
+  owner: RoleConsent;
+  'co-caregiver': RoleConsent;
+  viewer: RoleConsent;
+}
+
+/** Default consent is fully open to preserve current single-caregiver behavior (#1218). */
+export const DEFAULT_CONSENT_SETTINGS: ConsentSettings = {
+  owner: { medications: true, bills: true, wallet: true },
+  'co-caregiver': { medications: true, bills: true, wallet: true },
+  viewer: { medications: true, bills: true, wallet: true },
+};
 
 export interface CareRecipientRecord {
   id: string;
@@ -39,6 +97,8 @@ function rowToTask(row: CareTaskRow): CareTaskEntity {
 }
 /** Backward-compatibility alias for CareRecipientRecord (Issue #1067) */
 export type CareRecipientEntity = CareRecipientRecord;
+
+export type CareRecipientInput = Omit<CareRecipientEntity, 'id'>;
 
 interface CareRecipientRow {
   id: string;
@@ -209,6 +269,36 @@ export class CareRecipientsStore {
         primary_doctor TEXT,
         insurance TEXT
       );
+      CREATE TABLE IF NOT EXISTS care_recipient_caregivers (
+        recipient_id TEXT NOT NULL REFERENCES care_recipients(id) ON DELETE CASCADE,
+        caregiver_user_id TEXT NOT NULL,
+        email TEXT,
+        display_name TEXT,
+        role TEXT NOT NULL CHECK (role IN (${roles})),
+        status TEXT NOT NULL CHECK (status IN ('active', 'invited')),
+        access_token_hash TEXT UNIQUE,
+        invite_token_hash TEXT UNIQUE,
+        invited_by TEXT,
+        created_at TEXT NOT NULL,
+        accepted_at TEXT,
+        invite_expires_at TEXT,
+        PRIMARY KEY (recipient_id, caregiver_user_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_caregivers_access_token
+        ON care_recipient_caregivers (access_token_hash);
+      CREATE INDEX IF NOT EXISTS idx_caregivers_invite_token
+        ON care_recipient_caregivers (invite_token_hash);
+
+      CREATE TABLE IF NOT EXISTS handoff_notes (
+        id TEXT PRIMARY KEY,
+        recipient_id TEXT NOT NULL REFERENCES care_recipients(id) ON DELETE CASCADE,
+        author TEXT NOT NULL,
+        text TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_handoff_notes_lookup
+        ON handoff_notes (recipient_id, created_at DESC);
+
       CREATE TABLE IF NOT EXISTS approval_delegations (
         id TEXT PRIMARY KEY,
         recipient_id TEXT NOT NULL,
@@ -237,6 +327,29 @@ export class CareRecipientsStore {
       CREATE INDEX IF NOT EXISTS idx_care_tasks_recipient ON care_tasks(recipient_id, done);
       CREATE INDEX IF NOT EXISTS idx_approval_delegations_lookup
         ON approval_delegations (recipient_id, delegate, ends_at);
+
+      CREATE TABLE IF NOT EXISTS care_recipient_consent (
+        recipient_id TEXT PRIMARY KEY REFERENCES care_recipients(id) ON DELETE CASCADE,
+        consent_settings TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        updated_by TEXT
+      );
+
+      CREATE TABLE IF NOT EXISTS cost_splits (
+        id TEXT PRIMARY KEY,
+        transaction_id TEXT NOT NULL,
+        recipient_id TEXT NOT NULL,
+        total_amount REAL NOT NULL,
+        payer_id TEXT NOT NULL,
+        payer_name TEXT NOT NULL,
+        description TEXT,
+        shares TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_cost_splits_recipient
+        ON cost_splits (recipient_id);
+      CREATE INDEX IF NOT EXISTS idx_cost_splits_tx
+        ON cost_splits (transaction_id);
     `);
     this.migrateLegacyCaregiverColumn();
   }
@@ -358,12 +471,170 @@ export class CareRecipientsStore {
     const row = this.db.prepare('SELECT * FROM care_tasks WHERE id = ?').get(id) as CareTaskRow | undefined;
     return row ? rowToTask(row) : undefined;
   }
-}
 
-export interface NewCareTask {
-  title: string;
-  assignee?: string | null;
-  due_date?: string | null;
+  // ── Caregiver links (#1179) ─────────────────────────────────────────────────
+
+  /** Active caregivers and pending invites for a recipient, oldest first. */
+  listCaregivers(recipientId: string): RecipientCaregiver[] {
+    return this.db
+      .prepare(`SELECT ${CAREGIVER_COLUMNS} FROM care_recipient_caregivers WHERE recipient_id = ? ORDER BY created_at ASC`)
+      .all(recipientId) as RecipientCaregiver[];
+  }
+
+  getCaregiver(recipientId: string, caregiverUserId: string): RecipientCaregiver | undefined {
+    return this.db
+      .prepare(`SELECT ${CAREGIVER_COLUMNS} FROM care_recipient_caregivers WHERE recipient_id = ? AND caregiver_user_id = ?`)
+      .get(recipientId, caregiverUserId) as RecipientCaregiver | undefined;
+  }
+
+  /**
+   * Invites a caregiver by email. Re-inviting a pending address rotates its
+   * code and role; inviting an already active caregiver is rejected. Only the
+   * SHA-256 of the invite code is stored, so the returned code is the one
+   * chance to deliver it.
+   */
+  inviteCaregiver(input: {
+    recipientId: string;
+    email: string;
+    role: CaregiverRole;
+    invitedBy: string;
+  }): { caregiver: RecipientCaregiver; inviteToken: string } {
+    const email = normalizeEmail(input.email);
+    const inviteToken = generateSecret();
+    const now = Date.now();
+    return this.transaction(() => {
+      if (!this.getById(input.recipientId)) {
+        throw new CaregiverAccessError('recipient_not_found', 'Care recipient not found');
+      }
+      const result = this.db.prepare(`
+        INSERT INTO care_recipient_caregivers
+          (recipient_id, caregiver_user_id, email, role, status, invite_token_hash, invite_expires_at, invited_by, created_at)
+        VALUES (?, ?, ?, ?, 'invited', ?, ?, ?, ?)
+        ON CONFLICT (recipient_id, caregiver_user_id) DO UPDATE SET
+          role = excluded.role,
+          invite_token_hash = excluded.invite_token_hash,
+          invite_expires_at = excluded.invite_expires_at,
+          invited_by = excluded.invited_by
+        WHERE care_recipient_caregivers.status = 'invited'
+      `).run(
+        input.recipientId,
+        email,
+        email,
+        input.role,
+        hashSecret(inviteToken),
+        new Date(now + INVITE_TTL_MS).toISOString(),
+        input.invitedBy,
+        new Date(now).toISOString(),
+      );
+      if (Number(result.changes) === 0) {
+        throw new CaregiverAccessError('already_linked', 'Caregiver is already linked to this care recipient');
+      }
+      return { caregiver: this.getCaregiver(input.recipientId, email)!, inviteToken };
+    });
+  }
+
+  /**
+   * Redeems an invite code and issues an access token for that one recipient
+   * link. Tokens are scoped to a link rather than to the email address because
+   * the email is asserted by the inviter: a global identity would let an owner
+   * of one recipient invite someone else's address, accept it and reach that
+   * person's other recipients.
+   */
+  acceptInvite(inviteToken: string, displayName?: string): { caregiver: RecipientCaregiver; accessToken: string } {
+    return this.transaction(() => {
+      const invite = this.db
+        .prepare(`SELECT ${CAREGIVER_COLUMNS} FROM care_recipient_caregivers WHERE invite_token_hash = ? AND status = 'invited'`)
+        .get(hashSecret(inviteToken)) as RecipientCaregiver | undefined;
+      if (!invite) {
+        throw new CaregiverAccessError('invite_invalid', 'Invite code is invalid or has already been used');
+      }
+      if (!invite.invite_expires_at || Date.parse(invite.invite_expires_at) <= Date.now()) {
+        throw new CaregiverAccessError('invite_expired', 'Invite code has expired; ask an owner to re-send it');
+      }
+
+      const accessToken = generateSecret();
+      const acceptedAt = new Date().toISOString();
+      this.db.prepare(`
+        UPDATE care_recipient_caregivers
+        SET status = 'active', display_name = ?, access_token_hash = ?, accepted_at = ?,
+            invite_token_hash = NULL, invite_expires_at = NULL
+        WHERE recipient_id = ? AND caregiver_user_id = ?
+      `).run(displayName ?? null, hashSecret(accessToken), acceptedAt, invite.recipient_id, invite.caregiver_user_id);
+
+      return {
+        caregiver: {
+          ...invite,
+          status: 'active',
+          display_name: displayName ?? null,
+          accepted_at: acceptedAt,
+          invite_expires_at: null,
+        },
+        accessToken,
+      };
+    });
+  }
+
+  /** Resolves an access token to its active caregiver link (indexed lookup). */
+  authenticateCaregiver(accessToken: string): RecipientCaregiver | undefined {
+    return this.db
+      .prepare(`SELECT ${CAREGIVER_COLUMNS} FROM care_recipient_caregivers WHERE access_token_hash = ? AND status = 'active'`)
+      .get(hashSecret(accessToken)) as RecipientCaregiver | undefined;
+  }
+
+  /**
+   * Removes a caregiver link or revokes a pending invite; the link's access
+   * token stops working immediately. The last active owner cannot be removed,
+   * so a recipient is never left without someone able to manage access.
+   */
+  removeCaregiver(recipientId: string, caregiverUserId: string): boolean {
+    return this.transaction(() => {
+      const link = this.getCaregiver(recipientId, caregiverUserId);
+      if (!link) return false;
+      if (link.role === 'owner' && link.status === 'active') {
+        const { count } = this.db
+          .prepare(`SELECT COUNT(*) AS count FROM care_recipient_caregivers WHERE recipient_id = ? AND role = 'owner' AND status = 'active'`)
+          .get(recipientId) as { count: number };
+        if (count <= 1) {
+          throw new CaregiverAccessError('last_owner', 'Cannot remove the last owner of a care recipient');
+        }
+      }
+      this.db
+        .prepare('DELETE FROM care_recipient_caregivers WHERE recipient_id = ? AND caregiver_user_id = ?')
+        .run(recipientId, caregiverUserId);
+      return true;
+    });
+  }
+
+  // ── Shift handoff notes (#1180) ─────────────────────────────────────────────
+
+  addHandoffNote(input: HandoffNoteInput): HandoffNote {
+    const note: HandoffNote = {
+      id: `note_${Date.now()}_${randomUUID().slice(0, 8)}`,
+      ...input,
+      created_at: new Date().toISOString(),
+    };
+    this.db.prepare(`
+      INSERT INTO handoff_notes (id, recipient_id, author, text, created_at)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(note.id, note.recipient_id, note.author, note.text, note.created_at);
+    return note;
+  }
+
+  /**
+   * Newest notes first. Served by the (recipient_id, created_at) index, so the
+   * cost is O(log n + limit) regardless of how many notes a recipient has;
+   * rowid breaks ties between notes written in the same millisecond.
+   */
+  listHandoffNotes(recipientId: string, limit: number): HandoffNote[] {
+    return this.db
+      .prepare(`
+        SELECT id, recipient_id, author, text, created_at FROM handoff_notes
+        WHERE recipient_id = ?
+        ORDER BY created_at DESC, rowid DESC
+        LIMIT ?
+      `)
+      .all(recipientId, limit) as HandoffNote[];
+  }
   // ── Approval delegations (#1195) ──────────────────────────────────────────
 
   createDelegation(input: {
@@ -421,6 +692,270 @@ export interface NewCareTask {
     `).run(now.toISOString(), id, delegator, now.toISOString());
     return result.changes > 0 ? this.getDelegation(id) : undefined;
   }
+
+  // ── Granular Data-Sharing Consent (#1218) ───────────────────────────────────
+
+  /**
+   * Retrieves consent settings for a recipient. Returns DEFAULT_CONSENT_SETTINGS
+   * if no custom consent has been saved, ensuring backward compatibility.
+   * Time Complexity: O(1) via primary key index.
+   * Space Complexity: O(1).
+   */
+  getConsent(recipientId: string): ConsentSettings {
+    const row = this.db
+      .prepare('SELECT consent_settings FROM care_recipient_consent WHERE recipient_id = ?')
+      .get(recipientId) as { consent_settings: string } | undefined;
+
+    if (!row) return { ...DEFAULT_CONSENT_SETTINGS };
+    try {
+      const parsed = JSON.parse(row.consent_settings);
+      return {
+        owner: { ...DEFAULT_CONSENT_SETTINGS.owner, ...(parsed.owner || {}) },
+        'co-caregiver': { ...DEFAULT_CONSENT_SETTINGS['co-caregiver'], ...(parsed['co-caregiver'] || {}) },
+        viewer: { ...DEFAULT_CONSENT_SETTINGS.viewer, ...(parsed.viewer || {}) },
+      };
+    } catch {
+      return { ...DEFAULT_CONSENT_SETTINGS };
+    }
+  }
+
+  /**
+   * Updates consent settings for a recipient and records an audit log entry.
+   * Time Complexity: O(1) indexed write.
+   * Space Complexity: O(1).
+   */
+  updateConsent(recipientId: string, consent: ConsentSettings, updatedBy = 'owner'): ConsentSettings {
+    return this.transaction(() => {
+      if (!this.getById(recipientId)) {
+        throw new CaregiverAccessError('recipient_not_found', 'Care recipient not found');
+      }
+
+      // Owner role always retains full access
+      const sanitizedConsent: ConsentSettings = {
+        owner: { medications: true, bills: true, wallet: true },
+        'co-caregiver': {
+          medications: Boolean(consent['co-caregiver']?.medications),
+          bills: Boolean(consent['co-caregiver']?.bills),
+          wallet: Boolean(consent['co-caregiver']?.wallet),
+        },
+        viewer: {
+          medications: Boolean(consent.viewer?.medications),
+          bills: Boolean(consent.viewer?.bills),
+          wallet: Boolean(consent.viewer?.wallet),
+        },
+      };
+
+      const now = new Date().toISOString();
+      this.db.prepare(`
+        INSERT INTO care_recipient_consent (recipient_id, consent_settings, updated_at, updated_by)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT (recipient_id) DO UPDATE SET
+          consent_settings = excluded.consent_settings,
+          updated_at = excluded.updated_at,
+          updated_by = excluded.updated_by
+      `).run(recipientId, JSON.stringify(sanitizedConsent), now, updatedBy);
+
+      try {
+        appendAuditEntry({
+          event: 'consent_settings_updated',
+          actor: updatedBy,
+          details: {
+            recipientId,
+            consent: sanitizedConsent,
+            timestamp: now,
+          },
+        });
+      } catch (err: any) {
+        logger.warn({ err: err?.message || err }, '[care-recipients] failed appending to audit log');
+      }
+
+      return sanitizedConsent;
+    });
+  }
+
+  // ── Cost Splitting Ledger (#1220) ──────────────────────────────────────────
+
+  createCostSplit(input: {
+    transactionId: string;
+    recipientId: string;
+    totalAmount: number;
+    payerId: string;
+    payerName: string;
+    description?: string;
+    shares: CostSplitShare[];
+  }): CostSplit {
+    const id = `split_${Date.now()}_${randomUUID().slice(0, 8)}`;
+    const createdAt = new Date().toISOString();
+    const split: CostSplit = {
+      id,
+      transactionId: input.transactionId,
+      recipientId: input.recipientId,
+      totalAmount: input.totalAmount,
+      payerId: input.payerId,
+      payerName: input.payerName,
+      description: input.description,
+      shares: input.shares,
+      createdAt,
+    };
+
+    this.db.prepare(`
+      INSERT INTO cost_splits (id, transaction_id, recipient_id, total_amount, payer_id, payer_name, description, shares, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      split.id,
+      split.transactionId,
+      split.recipientId,
+      split.totalAmount,
+      split.payerId,
+      split.payerName,
+      split.description ?? null,
+      JSON.stringify(split.shares),
+      split.createdAt,
+    );
+
+    try {
+      appendAuditEntry({
+        event: 'cost_split_created',
+        actor: input.payerName,
+        details: {
+          splitId: split.id,
+          transactionId: split.transactionId,
+          totalAmount: split.totalAmount,
+          sharesCount: split.shares.length,
+        },
+      });
+    } catch (err: any) {
+      logger.warn({ err: err?.message || err }, '[care-recipients] failed appending cost split to audit log');
+    }
+
+    return split;
+  }
+
+  listCostSplits(recipientId: string): CostSplit[] {
+    const rows = this.db
+      .prepare('SELECT * FROM cost_splits WHERE recipient_id = ? ORDER BY created_at DESC')
+      .all(recipientId) as Array<{
+        id: string;
+        transaction_id: string;
+        recipient_id: string;
+        total_amount: number;
+        payer_id: string;
+        payer_name: string;
+        description: string | null;
+        shares: string;
+        created_at: string;
+      }>;
+
+    return rows.map((row) => ({
+      id: row.id,
+      transactionId: row.transaction_id,
+      recipientId: row.recipient_id,
+      totalAmount: row.total_amount,
+      payerId: row.payer_id,
+      payerName: row.payer_name,
+      description: row.description ?? undefined,
+      shares: JSON.parse(row.shares),
+      createdAt: row.created_at,
+    }));
+  }
+
+  getCostSplit(id: string): CostSplit | undefined {
+    const row = this.db
+      .prepare('SELECT * FROM cost_splits WHERE id = ?')
+      .get(id) as any;
+
+    if (!row) return undefined;
+    return {
+      id: row.id,
+      transactionId: row.transaction_id,
+      recipientId: row.recipient_id,
+      totalAmount: row.total_amount,
+      payerId: row.payer_id,
+      payerName: row.payer_name,
+      description: row.description ?? undefined,
+      shares: JSON.parse(row.shares),
+      createdAt: row.created_at,
+    };
+  }
+
+  getCostSplitByTx(transactionId: string): CostSplit | undefined {
+    const row = this.db
+      .prepare('SELECT * FROM cost_splits WHERE transaction_id = ?')
+      .get(transactionId) as any;
+
+    if (!row) return undefined;
+    return {
+      id: row.id,
+      transactionId: row.transaction_id,
+      recipientId: row.recipient_id,
+      totalAmount: row.total_amount,
+      payerId: row.payer_id,
+      payerName: row.payer_name,
+      description: row.description ?? undefined,
+      shares: JSON.parse(row.shares),
+      createdAt: row.created_at,
+    };
+  }
+
+  settleCostSplitShare(splitId: string, contributorId: string, settledBy = 'caregiver'): CostSplit {
+    return this.transaction(() => {
+      const split = this.getCostSplit(splitId);
+      if (!split) {
+        throw new Error('Cost split not found');
+      }
+
+      let modified = false;
+      const now = new Date().toISOString();
+      const updatedShares = split.shares.map((share) => {
+        if (share.caregiverId === contributorId && share.status !== 'settled') {
+          modified = true;
+          return {
+            ...share,
+            status: 'settled' as const,
+            settledAt: now,
+            settledBy,
+          };
+        }
+        return share;
+      });
+
+      if (modified) {
+        this.db.prepare(`
+          UPDATE cost_splits SET shares = ? WHERE id = ?
+        `).run(JSON.stringify(updatedShares), splitId);
+
+        try {
+          appendAuditEntry({
+            event: 'cost_split_settled',
+            actor: settledBy,
+            details: {
+              splitId,
+              contributorId,
+              settledAt: now,
+            },
+          });
+        } catch (err: any) {
+          logger.warn({ err: err?.message || err }, '[care-recipients] failed appending cost split settlement to audit log');
+        }
+      }
+
+      return {
+        ...split,
+        shares: updatedShares,
+      };
+    });
+  }
+
+  getContributorBalances(recipientId: string): ContributorBalanceSummary {
+    const splits = this.listCostSplits(recipientId);
+    return calculateContributorBalances(splits);
+  }
+}
+
+export interface NewCareTask {
+  title: string;
+  assignee?: string | null;
+  due_date?: string | null;
 }
 
 export function createCareRecipientsStore(dbPath?: string): CareRecipientsStore {

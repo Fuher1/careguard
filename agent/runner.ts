@@ -209,7 +209,11 @@ export async function executeTool(
         } else {
           items = input.line_items || input.line_items_json;
         }
-        result = await auditBill(items);
+        result = await auditBill(items, {
+          providerId: (input.provider_id as string) || provId,
+          providerName: (input.provider_name as string) || provName,
+          recipientId: rid,
+        });
         break;
       }
       case "fetch_rosa_bill":
@@ -246,9 +250,11 @@ export async function executeTool(
           pharmName || "",
           drugN || "",
           amt,
-          false,
-          30,
+          Boolean(input.skip_approval),
+          Number(input.days_supply ?? 30),
           memo,
+          rid,
+          input.cost_split as any,
         );
         break;
       case "pay_bill":
@@ -257,8 +263,10 @@ export async function executeTool(
           provName || "",
           desc || "",
           amt,
-          false,
+          Boolean(input.skip_approval),
           memo,
+          rid,
+          input.cost_split as any,
         );
         break;
       case "check_spending_policy":
@@ -295,6 +303,8 @@ export async function executeTool(
             caregiverName: input.caregiver_name as string,
             caregiverEmail: input.caregiver_email as string,
           },
+          input.reason as any,
+          rid,
         );
         break;
       }

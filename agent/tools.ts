@@ -103,6 +103,39 @@ import {
   createMockReceipt,
   isMockNetwork,
 } from "../shared/network-mode.ts";
+import {
+  checkMedicationAllergies,
+  loadRecipientAllergies,
+  addRecipientAllergy,
+  removeRecipientAllergy,
+  type RecipientAllergy,
+  type AllergyCheckResult,
+} from "../shared/allergies.ts";
+import {
+  runPriceWatchForRecipient,
+  type PriceWatchResult,
+} from "./price-watch.ts";
+import {
+  extractLineItemsFromBillImage,
+  type OcrExtractionResult,
+} from "../shared/bill-ocr.ts";
+import { redactPII } from "../shared/redact.ts";
+import {
+  DEFAULT_RECIPIENT_ID,
+  getCareRecipientsStore,
+} from "../services/care-recipients/db.ts";
+import {
+  HANDOFF_NOTES_TOOL_DEFAULT,
+  HANDOFF_NOTES_TOOL_MAX,
+} from "./tool-input-validation.ts";
+import { getProviderBillHistoryStore } from "../services/bill-audit-api/history.ts";
+import {
+  DISPUTE_TEMPLATES,
+  type DisputeReasonTemplate,
+  inferDisputeTemplate,
+  formatDisputeLetter,
+} from "../shared/dispute-templates.ts";
+import type { CostSplitShare } from "../shared/cost-split.ts";
 
 assertMockNetworkAllowed();
 
@@ -648,6 +681,9 @@ function getPolicyFile(recipientId?: string): string {
 }
 function getOrdersFile(recipientId?: string): string {
   return `${getRecipientDir(recipientId || currentRecipientId)}/orders.json`;
+}
+function getDisputesFile(recipientId?: string): string {
+  return `${getRecipientDir(recipientId || currentRecipientId)}/disputes.json`;
 }
 
 // Migrate legacy flat files to per-recipient structure (one-time)
@@ -1582,7 +1618,10 @@ export async function fetchAndAuditBill(recipientId?: string) {
 }
 
 // --- Tool: Audit a medical bill (pays via x402) ---
-export async function auditBill(lineItemsInput: unknown) {
+export async function auditBill(
+  lineItemsInput: unknown,
+  options?: { providerId?: string; providerName?: string; recipientId?: string },
+) {
   let lineItems: LineItem[];
   try {
     lineItems = validateLineItems(lineItemsInput);
@@ -1600,7 +1639,7 @@ export async function auditBill(lineItemsInput: unknown) {
 
   const fee = getToolFee("auditBill");
   logger.info(
-    { lineItemCount: lineItems.length, fee },
+    { lineItemCount: lineItems.length, fee, providerId: options?.providerId },
     "[x402] paying for bill audit",
   );
 
@@ -1610,6 +1649,64 @@ export async function auditBill(lineItemsInput: unknown) {
       (sum, item) => sum + item.chargedAmount,
       0,
     );
+
+    const historyStore = getProviderBillHistoryStore();
+    let comparisonBasis;
+    const auditedItems = lineItems.map((item) => {
+      let status = "valid";
+      let errorDescription: string | null = null;
+      let suggestedAmount = item.chargedAmount;
+
+      if (options?.providerId) {
+        const hist = historyStore.compareAgainstHistory({
+          providerId: options.providerId,
+          providerName: options.providerName,
+          cptCode: item.cptCode,
+          currentChargedAmount: item.chargedAmount,
+        });
+        if (hist) {
+          comparisonBasis = {
+            priorBillsCount: hist.priorBillsCount,
+            dateRange: hist.dateRange,
+            providerName: hist.providerName,
+          };
+          if (hist.isMaterialIncrease) {
+            status = "flagged";
+            suggestedAmount = +hist.averageCharged.toFixed(2);
+            errorDescription = `Billed amount $${item.chargedAmount.toFixed(
+              2,
+            )} is ${hist.percentIncrease.toFixed(
+              1,
+            )}% higher than provider historical average of $${hist.averageCharged.toFixed(
+              2,
+            )} across ${hist.priorBillsCount} prior bills`;
+          }
+        }
+      }
+
+      return {
+        ...item,
+        status,
+        errorDescription,
+        suggestedAmount,
+      };
+    });
+
+    const errorCount = auditedItems.filter((i) => i.status !== "valid").length;
+    const totalOvercharge = auditedItems.reduce((sum, i) => {
+      return i.status !== "valid" ? sum + (i.chargedAmount - (i.suggestedAmount ?? i.chargedAmount)) : sum;
+    }, 0);
+    const totalCorrect = totalCharged - totalOvercharge;
+
+    if (options?.providerId) {
+      historyStore.recordBillCharges({
+        providerId: options.providerId,
+        providerName: options.providerName || "Healthcare Provider",
+        recipientId: options.recipientId,
+        lineItems,
+      });
+    }
+
     const data = {
       auditTimestamp: new Date().toISOString(),
       protocol: {
@@ -1620,17 +1717,16 @@ export async function auditBill(lineItemsInput: unknown) {
         receipt,
       },
       totalCharged: +totalCharged.toFixed(2),
-      totalCorrect: +totalCharged.toFixed(2),
-      totalOvercharge: 0,
-      savingsPercent: 0,
-      errorCount: 0,
-      lineItems: lineItems.map((item) => ({
-        ...item,
-        status: "valid",
-        errorDescription: null,
-        suggestedAmount: item.chargedAmount,
-      })),
-      recommendation: "Mock network audit completed. No errors detected.",
+      totalCorrect: +totalCorrect.toFixed(2),
+      totalOvercharge: +totalOvercharge.toFixed(2),
+      savingsPercent: +( (totalOvercharge / (totalCharged || 1)) * 100 ).toFixed(1),
+      errorCount,
+      lineItems: auditedItems,
+      comparisonBasis,
+      recommendation:
+        errorCount > 0
+          ? `Identified $${totalOvercharge.toFixed(2)} in discrepancies compared to provider history. Submit a formal dispute letter before paying.`
+          : "Mock network audit completed. No errors detected.",
     };
     recordServiceFee(
       fee,
@@ -1646,7 +1742,12 @@ export async function auditBill(lineItemsInput: unknown) {
     response = await getX402Fetch()(`${BILL_AUDIT_API}/bill/audit`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ lineItems }),
+      body: JSON.stringify({
+        lineItems,
+        providerId: options?.providerId,
+        providerName: options?.providerName,
+        recipientId: options?.recipientId,
+      }),
     });
   } catch (err) {
     throw upstreamConnectionError(BILL_AUDIT_UPSTREAM, err);
@@ -2219,6 +2320,20 @@ export async function payForMedication(
   daysSupply: number = 30,
   memo?: string,
   _recipientId?: string,
+  costSplit?: {
+    shares: Array<{
+      caregiverId?: string;
+      contributor_id?: string;
+      caregiverName?: string;
+      contributor_name?: string;
+      amount?: number;
+      share_amount?: number;
+      status?: "owed" | "settled";
+    }>;
+    payerId?: string;
+    payerName?: string;
+    description?: string;
+  },
 ) {
   if (!Number.isFinite(amount) || amount <= 0 || amount > MAX_PAYMENT) {
     return {
@@ -2450,7 +2565,29 @@ export async function payForMedication(
     });
   }
 
-  return { success: true, transaction: tx };
+  let createdSplit;
+  if (costSplit?.shares && Array.isArray(costSplit.shares) && costSplit.shares.length > 0) {
+    try {
+      createdSplit = getCareRecipientsStore().createCostSplit({
+        recipientId: targetRecipientId,
+        transactionId: tx.id,
+        totalAmount: amount,
+        payerId: costSplit.payerId || "primary_caregiver",
+        payerName: costSplit.payerName || "Primary Caregiver",
+        description: costSplit.description || `${drugName} from ${pharmacyName}`,
+        shares: costSplit.shares.map((s) => ({
+          caregiverId: s.caregiverId || s.contributor_id || "contributor",
+          caregiverName: s.caregiverName || s.contributor_name || "Caregiver",
+          amount: Number(s.amount || s.share_amount || 0),
+          status: s.status || "owed",
+        })),
+      });
+    } catch (err: any) {
+      logger.warn({ err: err?.message || err }, "[cost-split] failed recording medication split");
+    }
+  }
+
+  return { success: true, transaction: tx, ...(createdSplit ? { costSplit: createdSplit } : {}) };
 }
 
 // Helper: build, sign, and submit a single USDC payment so payBill can retry on tx_bad_seq
@@ -2496,6 +2633,20 @@ export async function payBill(
   skipApproval: boolean = false,
   memo?: string,
   _recipientId?: string,
+  costSplit?: {
+    shares: Array<{
+      caregiverId?: string;
+      contributor_id?: string;
+      caregiverName?: string;
+      contributor_name?: string;
+      amount?: number;
+      share_amount?: number;
+      status?: "owed" | "settled";
+    }>;
+    payerId?: string;
+    payerName?: string;
+    description?: string;
+  },
 ) {
   if (!Number.isFinite(amount) || amount <= 0 || amount > MAX_PAYMENT) {
     return {
@@ -2701,7 +2852,29 @@ export async function payBill(
     });
   }
 
-  return { success: true, transaction: tx };
+  let createdSplit;
+  if (costSplit?.shares && Array.isArray(costSplit.shares) && costSplit.shares.length > 0) {
+    try {
+      createdSplit = getCareRecipientsStore().createCostSplit({
+        recipientId: currentRecipientId,
+        transactionId: tx.id,
+        totalAmount: amount,
+        payerId: costSplit.payerId || "primary_caregiver",
+        payerName: costSplit.payerName || "Primary Caregiver",
+        description: costSplit.description || `${description} — ${providerName}`,
+        shares: costSplit.shares.map((s) => ({
+          caregiverId: s.caregiverId || s.contributor_id || "contributor",
+          caregiverName: s.caregiverName || s.contributor_name || "Caregiver",
+          amount: Number(s.amount || s.share_amount || 0),
+          status: s.status || "owed",
+        })),
+      });
+    } catch (err: any) {
+      logger.warn({ err: err?.message || err }, "[cost-split] failed recording bill split");
+    }
+  }
+
+  return { success: true, transaction: tx, ...(createdSplit ? { costSplit: createdSplit } : {}) };
 }
 
 // --- Tool: Get spending summary ---
@@ -2856,7 +3029,41 @@ function appendAdherenceEntry(
   });
 }
 
-// --- Tool: Generate a dispute letter PDF + email body (Issue #266) ---
+export interface DisputeRecord {
+  id: string;
+  billId: string;
+  recipientId: string;
+  template: DisputeReasonTemplate;
+  totalOvercharge: number;
+  errorCount: number;
+  letterBody: string;
+  facility: string;
+  caregiverName: string;
+  caregiverEmail: string;
+  createdAt: string;
+  status: "draft" | "generated" | "sent" | "resolved";
+}
+
+function loadDisputes(recipientId?: string): DisputeRecord[] {
+  const file = getDisputesFile(recipientId);
+  if (!existsSync(file)) return [];
+  try {
+    return JSON.parse(readFileSync(file, "utf-8"));
+  } catch {
+    return [];
+  }
+}
+
+function saveDisputeRecord(record: DisputeRecord, recipientId?: string): void {
+  const file = getDisputesFile(recipientId);
+  const dir = getRecipientDir(recipientId || currentRecipientId);
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  const existing = loadDisputes(recipientId);
+  existing.push(record);
+  writeAtomically(file, JSON.stringify(existing, null, 2));
+}
+
+// --- Tool: Generate a dispute letter PDF + email body (Issues #266, #1224) ---
 export function generateDisputeLetter(
   billId: string,
   errorIds: string[],
@@ -2877,55 +3084,50 @@ export function generateDisputeLetter(
     caregiverName: string;
     caregiverEmail: string;
   },
+  reason?: DisputeReasonTemplate,
+  recipientId?: string,
 ) {
   const errorItems = auditResult.lineItems.filter(
     (item) => errorIds.length === 0 || errorIds.includes(item.description),
   );
 
-  const letterLines: string[] = [];
-  letterLines.push(`Dear ${recipientInfo.facility} Billing Department,`);
-  letterLines.push("");
-  letterLines.push(
-    `I am writing on behalf of ${recipientInfo.name}, a patient at your facility, to formally dispute the following billing errors identified in Bill #${billId}.`,
-  );
-  letterLines.push("");
-  letterLines.push(
-    "After auditing the bill, we found the following discrepancies:",
-  );
-  letterLines.push("");
-
-  for (const item of errorItems) {
-    letterLines.push(
-      `  - ${item.description}${item.cptCode ? ` (CPT: ${item.cptCode})` : ""}: Charged $${item.chargedAmount.toFixed(2)}`,
+  const templateKey: DisputeReasonTemplate =
+    reason ||
+    inferDisputeTemplate(
+      errorItems.map((item) => ({
+        errorDescription: item.errorDescription,
+        description: item.description,
+      })),
     );
-    if (item.suggestedAmount !== undefined) {
-      letterLines.push(
-        `    Fair market rate: $${item.suggestedAmount.toFixed(2)}`,
-      );
-    }
-    if (item.errorDescription) {
-      letterLines.push(`    Issue: ${item.errorDescription}`);
-    }
-    letterLines.push("");
-  }
 
-  letterLines.push(
-    `Total overcharge identified: $${auditResult.totalOvercharge.toFixed(2)}`,
-  );
-  letterLines.push("");
-  letterLines.push(
-    "We request that these charges be reviewed and corrected. Please adjust the bill to reflect the fair-market rates as outlined above.",
-  );
-  letterLines.push("");
-  letterLines.push("Thank you for your prompt attention to this matter.");
-  letterLines.push("");
-  letterLines.push("Sincerely,");
-  letterLines.push(recipientInfo.caregiverName);
-  letterLines.push(recipientInfo.caregiverEmail);
+  const emailBody = formatDisputeLetter({
+    billId,
+    templateKey,
+    recipientInfo,
+    disputedItems: errorItems,
+    totalOvercharge: auditResult.totalOvercharge,
+  });
 
-  const emailBody = letterLines.join("\n");
   const pdf = `careguard-dispute-letter-${billId}.pdf`;
-  return { pdf, emailBody };
+
+  const record: DisputeRecord = {
+    id: `dispute_${Date.now()}`,
+    billId,
+    recipientId: recipientId || currentRecipientId,
+    template: templateKey,
+    totalOvercharge: auditResult.totalOvercharge,
+    errorCount: auditResult.errorCount,
+    letterBody: emailBody,
+    facility: recipientInfo.facility,
+    caregiverName: recipientInfo.caregiverName,
+    caregiverEmail: recipientInfo.caregiverEmail,
+    createdAt: new Date().toISOString(),
+    status: "generated",
+  };
+
+  saveDisputeRecord(record, recipientId);
+
+  return { pdf, emailBody, template: templateKey, disputeRecord: record };
 }
 
 // --- Tool: Adherence status (Issue #264) ---
@@ -3113,7 +3315,7 @@ export const TOOL_DEFINITIONS = [
   {
     name: "audit_medical_bill",
     description:
-      "Audit a medical bill for errors (duplicates, upcoding, overcharges). 80% of medical bills contain errors. Pays $0.01 USDC per audit via x402 on Stellar. Pass line_items_json as a JSON string array of line items. Each line item must include description, cptCode, quantity, and chargedAmount. cptCode must match /^(?:\\d{5}|J\\d{4})$/, quantity must be > 0, and chargedAmount must be > 0.",
+      "Audit a medical bill for errors (duplicates, upcoding, overcharges). 80% of medical bills contain errors. Pays $0.01 USDC per audit via x402 on Stellar. Pass line_items_json as a JSON string array of line items. Each line item must include description, cptCode, quantity, and chargedAmount. cptCode must match /^(?:\\d{5}|J\\d{4})$/, quantity must be > 0, and chargedAmount must be > 0. Optionally pass provider_id/provider_name to cross-reference against historical charges from that provider.",
     input_schema: strictInputSchema({
       type: "object" as const,
       properties: {
@@ -3121,6 +3323,14 @@ export const TOOL_DEFINITIONS = [
           type: "string",
           description:
             'JSON string of line items array. Each item must include description, cptCode, quantity, and chargedAmount. Example: [{"description":"Office visit","cptCode":"99213","quantity":1,"chargedAmount":130}]',
+        },
+        provider_id: {
+          type: "string",
+          description: "Healthcare provider ID for historical charge comparisons",
+        },
+        provider_name: {
+          type: "string",
+          description: "Healthcare provider name",
         },
         recipient_id: {
           type: "string",
@@ -3174,9 +3384,7 @@ export const TOOL_DEFINITIONS = [
     }),
   },
   {
-    name: "pay_for_medication",
-    description:
-      "Pay a pharmacy for a medication order via MPP Charge on Stellar (real USDC payment). Subject to spending policy limits. Amount must be between $0.01 and $10,000. If the payment is blocked by spending policy, the result includes a budgetContext object { reason, attempted, dailyRemaining, monthlyRemaining, suggestion }: relay it to the caregiver so they can either approve a one-time override or pick a cheaper option within the remaining budget.",
+    description: `Pay a pharmacy for a medication order via MPP Charge on Stellar (real USDC payment). Subject to spending policy limits. Amount must be between $0.01 and $${MAX_PAYMENT}. If the payment is blocked by spending policy, the result includes a budgetContext object { reason, attempted, dailyRemaining, monthlyRemaining, suggestion }: relay it to the caregiver so they can either approve a one-time override or pick a cheaper option within the remaining budget. Optionally supports splitting costs across contributing caregivers.`,
     input_schema: strictInputSchema({
       type: "object" as const,
       properties: {
@@ -3196,6 +3404,11 @@ export const TOOL_DEFINITIONS = [
           description:
             "Optional caregiver memo for personal record-keeping (max 28 bytes, Stellar MEMO_TEXT limit).",
         },
+        cost_split: {
+          type: "object",
+          description:
+            "Optional cost split across caregivers, e.g. { shares: [{ caregiverId, caregiverName, amount }] }",
+        },
         recipient_id: {
           type: "string",
           description: "Care recipient ID (default: rosa)",
@@ -3206,8 +3419,7 @@ export const TOOL_DEFINITIONS = [
   },
   {
     name: "pay_bill",
-    description:
-      "Pay a medical bill via direct Stellar USDC transfer. Subject to spending policy limits. If the bill has been audited and errors found, pay only the corrected amount. Amount must be between $0.01 and $10,000.",
+    description: `Pay a medical bill via direct Stellar USDC transfer. Subject to spending policy limits. If the bill has been audited and errors found, pay only the corrected amount. Amount must be between $0.01 and $${MAX_PAYMENT}. Optionally supports splitting costs across contributing caregivers.`,
     input_schema: strictInputSchema({
       type: "object" as const,
       properties: {
@@ -3222,6 +3434,11 @@ export const TOOL_DEFINITIONS = [
           type: "string",
           description:
             "Optional caregiver memo for personal record-keeping (max 28 bytes, Stellar MEMO_TEXT limit).",
+        },
+        cost_split: {
+          type: "object",
+          description:
+            "Optional cost split across caregivers, e.g. { shares: [{ caregiverId, caregiverName, amount }] }",
         },
         recipient_id: {
           type: "string",
@@ -3332,6 +3549,18 @@ export const TOOL_DEFINITIONS = [
         caregiver_email: {
           type: "string",
           description: "Caregiver email for signature",
+        },
+        reason: {
+          type: "string",
+          enum: [
+            "duplicate_charge",
+            "coding_error",
+            "balance_billing",
+            "unbundling",
+            "general_dispute",
+          ],
+          description:
+            "Dispute reason selecting the template: 'duplicate_charge', 'coding_error', 'balance_billing', 'unbundling', or 'general_dispute'",
         },
         recipient_id: {
           type: "string",

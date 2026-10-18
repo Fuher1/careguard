@@ -14,7 +14,15 @@ import {
   type DisputeLetter,
   type ItemPresenceMap,
   type CaregiverProfile,
+  type ConsentSettings,
 } from "../../lib/types";
+import {
+  DISPUTE_TEMPLATES,
+  type DisputeReasonTemplate,
+  inferDisputeTemplate,
+  formatDisputeLetter,
+  formatDisputeHtml,
+} from "../../lib/dispute-templates";
 import {
   BillLineItemsVirtualized,
   type BillLineItem,
@@ -38,6 +46,7 @@ export interface BillsTabProps {
   locale?: Locale;
   currentCaregiver?: CaregiverProfile;
   linkedCaregivers?: CaregiverProfile[];
+  consentSettings?: ConsentSettings;
 }
 
 function formatTimeAgo(isoDate: string): string {
@@ -59,13 +68,24 @@ export function BillsTab({
     { name: "Maria Garcia", relationship: "Primary Caregiver" },
     { name: "David Garcia", relationship: "Secondary Caregiver" },
   ],
+  consentSettings,
 }: BillsTabProps) {
   const [showErrorsOnly, setShowErrorsOnly] = useState(false);
   const [sortByOvercharge, setSortByOvercharge] = useState(false);
   const [generatingDispute, setGeneratingDispute] = useState<string | null>(null);
+  const [selectedTemplate, setSelectedTemplate] = useState<DisputeReasonTemplate>("duplicate_charge");
+  const [customLetterBody, setCustomLetterBody] = useState<Record<string, string>>({});
+  const [editingAuditKey, setEditingAuditKey] = useState<string | null>(null);
   const [presenceMap, setPresenceMap] = useState<ItemPresenceMap>({});
   const [savingsWindow, setSavingsWindow] = useState<"month" | "year" | "all">("all");
   const b = getTranslations(locale).bills;
+
+  const isRestricted =
+    currentCaregiver &&
+    currentCaregiver.role &&
+    currentCaregiver.role !== "owner" &&
+    consentSettings &&
+    consentSettings[currentCaregiver.role]?.bills === false;
 
   // ── Camera Capture & OCR State (Issue #1229) ──────────────────────────────
   const [capturedImage, setCapturedImage] = useState<string | null>(null);
@@ -327,14 +347,17 @@ export function BillsTab({
     async (auditResult: any, auditKey: string) => {
       setGeneratingDispute(auditKey);
       try {
+        const text =
+          customLetterBody[auditKey] ||
+          generateDisputeText(auditResult, recipient, selectedTemplate);
         const letter: DisputeLetter = {
           billId: `bill-${Date.now()}`,
           recipientName: recipient.name,
           facility: facilityName || recipient.facility || "General Hospital",
           totalOvercharge: auditResult.totalOvercharge,
           errorCount: auditResult.errorCount,
-          emailText: generateDisputeText(auditResult, recipient),
-          emailHtml: generateDisputeHtml(auditResult, recipient),
+          emailText: text,
+          emailHtml: generateDisputeHtml(auditResult, recipient, selectedTemplate),
           generatedAt: new Date().toISOString(),
         };
         downloadDisputeLetterPDF(letter);
@@ -343,19 +366,22 @@ export function BillsTab({
         setGeneratingDispute(null);
       }
     },
-    [recipient, facilityName],
+    [recipient, facilityName, customLetterBody, selectedTemplate],
   );
 
   const handleDisputeEmail = useCallback(
-    async (auditResult: any) => {
+    async (auditResult: any, auditKey?: string) => {
+      const text =
+        (auditKey && customLetterBody[auditKey]) ||
+        generateDisputeText(auditResult, recipient, selectedTemplate);
       const letter: DisputeLetter = {
         billId: `bill-${Date.now()}`,
         recipientName: recipient.name,
         facility: facilityName || recipient.facility || "General Hospital",
         totalOvercharge: auditResult.totalOvercharge,
         errorCount: auditResult.errorCount,
-        emailText: generateDisputeText(auditResult, recipient),
-        emailHtml: generateDisputeHtml(auditResult, recipient),
+        emailText: text,
+        emailHtml: generateDisputeHtml(auditResult, recipient, selectedTemplate),
         generatedAt: new Date().toISOString(),
       };
       const html = downloadDisputeLetterEmail(letter);
@@ -363,7 +389,7 @@ export function BillsTab({
       const url = URL.createObjectURL(blob);
       window.open(url, "_blank");
     },
-    [recipient, facilityName],
+    [recipient, facilityName, customLetterBody, selectedTemplate],
   );
 
   const billViewers = hasMultipleCaregivers
@@ -381,6 +407,45 @@ export function BillsTab({
     : savingsWindow === "year"
       ? totalSavings
       : totalSavings;
+
+  if (isRestricted) {
+    return (
+      <div
+        role="tabpanel"
+        id="tabpanel-bills"
+        aria-labelledby="tab-bills"
+        tabIndex={0}
+        className="space-y-6"
+      >
+        <div className="bg-amber-50 border border-amber-200 rounded-xl p-8 text-center max-w-xl mx-auto my-12">
+          <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-amber-100 text-amber-600">
+            <svg
+              className="h-6 w-6"
+              fill="none"
+              viewBox="0 0 24 24"
+              strokeWidth={1.5}
+              stroke="currentColor"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M16.5 10.5V6.75a4.5 4.5 0 1 0-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 0 0 2.25-2.25v-6.75a2.25 2.25 0 0 0-2.25-2.25H6.75a2.25 2.25 0 0 0-2.25 2.25v6.75a2.25 2.25 0 0 0 2.25 2.25Z"
+              />
+            </svg>
+          </div>
+          <h3 className="text-base font-semibold text-amber-900">
+            Access Restricted by Care Recipient
+          </h3>
+          <p className="mt-2 text-sm text-amber-700">
+            Consent settings for {recipient.name} restrict viewing billing records for {currentCaregiver.role} caregivers.
+          </p>
+          <p className="mt-1 text-xs text-amber-600">
+            Contact the primary caregiver to adjust data-sharing permissions in Settings.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div
@@ -746,6 +811,47 @@ export function BillsTab({
                   </button>
                   {tc.result.errorCount > 0 && (
                     <>
+                      <select
+                        aria-label="Dispute reason template"
+                        value={selectedTemplate}
+                        onChange={(e) => {
+                          const nextTpl = e.target.value as DisputeReasonTemplate;
+                          setSelectedTemplate(nextTpl);
+                          setCustomLetterBody((prev) => ({
+                            ...prev,
+                            [auditCallKey(tc)]: generateDisputeText(tc.result, recipient, nextTpl),
+                          }));
+                        }}
+                        className="text-xs px-2 py-1 border border-slate-300 rounded-lg bg-white text-slate-700 focus:outline-none focus:ring-1 focus:ring-sky-500"
+                      >
+                        <option value="duplicate_charge">Duplicate Billing (CMS Ch. 1 § 80.3.2)</option>
+                        <option value="coding_error">Coding Discrepancy / Upcoding (AMA CPT)</option>
+                        <option value="balance_billing">Balance Billing (No Surprises Act 45 CFR § 149)</option>
+                        <option value="unbundling">Unbundled Service Charges (CMS NCCI)</option>
+                        <option value="general_dispute">General Discrepancy & Fair-Market Audit</option>
+                      </select>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const key = auditCallKey(tc);
+                          if (editingAuditKey === key) {
+                            setEditingAuditKey(null);
+                          } else {
+                            setEditingAuditKey(key);
+                            if (!customLetterBody[key]) {
+                              setCustomLetterBody((prev) => ({
+                                ...prev,
+                                [key]: generateDisputeText(tc.result, recipient, selectedTemplate),
+                              }));
+                            }
+                          }
+                        }}
+                        className="px-2.5 py-1.5 bg-slate-100 text-slate-700 rounded-lg text-xs font-medium hover:bg-slate-200 cursor-pointer transition-all"
+                      >
+                        {editingAuditKey === auditCallKey(tc) ? "Hide Preview" : "Preview & Edit"}
+                      </button>
+
                       <button
                         onClick={() => handleDispute(tc.result, auditCallKey(tc))}
                         disabled={generatingDispute === auditCallKey(tc)}
@@ -764,7 +870,7 @@ export function BillsTab({
                         )}
                       </button>
                       <button
-                        onClick={() => handleDisputeEmail(tc.result)}
+                        onClick={() => handleDisputeEmail(tc.result, auditCallKey(tc))}
                         className="px-3 py-1.5 bg-amber-50 text-amber-700 rounded-lg text-xs font-medium hover:bg-amber-100 active:bg-amber-200 cursor-pointer transition-all"
                       >
                         Email Text
@@ -782,6 +888,52 @@ export function BillsTab({
                   </span>
                 </div>
               </div>
+
+              {/* Editable Dispute Letter Preview Panel (Issue #1224) */}
+              {tc.result.errorCount > 0 && editingAuditKey === auditCallKey(tc) && (
+                <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <h4 className="text-xs font-semibold text-slate-800">
+                        {DISPUTE_TEMPLATES[selectedTemplate]?.title}
+                      </h4>
+                      <p className="text-[11px] text-slate-500 mt-0.5">
+                        Statutory citations: {DISPUTE_TEMPLATES[selectedTemplate]?.legalBasis.join(" | ")}
+                      </p>
+                    </div>
+                    <span className="text-[11px] text-slate-500">Live Editable Preview</span>
+                  </div>
+                  <textarea
+                    rows={8}
+                    value={
+                      customLetterBody[auditCallKey(tc)] ??
+                      generateDisputeText(tc.result, recipient, selectedTemplate)
+                    }
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setCustomLetterBody((prev) => ({
+                        ...prev,
+                        [auditCallKey(tc)]: val,
+                      }));
+                    }}
+                    className="w-full text-xs font-mono p-3 bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-sky-500 text-slate-800"
+                  />
+                </div>
+              )}
+
+              {/* Provider Charge History Comparison Basis (Issue #1217) */}
+              {tc.result.comparisonBasis && (
+                <div className="bg-sky-50 border border-sky-200 rounded-xl p-3 text-xs text-sky-800 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <div>
+                    <span className="font-semibold">Provider Historical Cross-Reference:</span> Compared against{" "}
+                    <span className="font-bold">{tc.result.comparisonBasis.priorBillsCount} prior bill(s)</span> ({tc.result.comparisonBasis.dateRange}) from{" "}
+                    <span className="font-semibold">{tc.result.comparisonBasis.providerName}</span>.
+                  </div>
+                  <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium bg-sky-100 text-sky-800 w-fit">
+                    Historical Baseline
+                  </span>
+                </div>
+              )}
 
               {/* Recommendation Callout */}
               {tc.result.recommendation?.trim() ? (
@@ -882,62 +1034,50 @@ export function BillsTab({
   );
 }
 
-function generateDisputeText(auditResult: any, recipient: RecipientProfile): string {
+function generateDisputeText(
+  auditResult: any,
+  recipient: RecipientProfile,
+  templateKey?: DisputeReasonTemplate,
+  customBody?: string,
+): string {
+  if (customBody) return customBody;
   const errorItems = (auditResult.lineItems || []).filter(
     (item: any) => item.status !== "valid",
   );
-  const lines: string[] = [];
-  lines.push(`Dear ${recipient.facility || "General Hospital"} Billing Department,`);
-  lines.push("");
-  lines.push(
-    `I am writing on behalf of ${recipient.name} to formally dispute the following billing errors:`,
-  );
-  lines.push("");
-  for (const item of errorItems) {
-    lines.push(
-      `  - ${item.description}${item.cptCode ? ` (CPT: ${item.cptCode})` : ""}: Charged $${item.chargedAmount.toFixed(2)}`,
-    );
-    if (item.suggestedAmount !== undefined) {
-      lines.push(`    Fair market rate: $${item.suggestedAmount.toFixed(2)}`);
-    }
-    if (item.errorDescription) {
-      lines.push(`    Issue: ${item.errorDescription}`);
-    }
-    lines.push("");
-  }
-  lines.push(`Total overcharge: $${auditResult.totalOvercharge.toFixed(2)}`);
-  lines.push("");
-  lines.push("We request these charges be reviewed and corrected.");
-  lines.push("");
-  lines.push("Sincerely,");
-  lines.push("Maria Garcia");
-  return lines.join("\n");
+  const inferred = templateKey || inferDisputeTemplate(errorItems);
+  return formatDisputeLetter({
+    billId: auditResult.billId || `bill-${Date.now()}`,
+    templateKey: inferred,
+    recipientInfo: {
+      name: recipient.name,
+      facility: recipient.facility || "General Hospital",
+      caregiverName: "Maria Garcia",
+      caregiverEmail: "caregiver@example.com",
+    },
+    disputedItems: errorItems,
+    totalOvercharge: auditResult.totalOvercharge,
+  });
 }
 
-function generateDisputeHtml(auditResult: any, recipient: RecipientProfile): string {
+function generateDisputeHtml(
+  auditResult: any,
+  recipient: RecipientProfile,
+  templateKey?: DisputeReasonTemplate,
+): string {
   const errorItems = (auditResult.lineItems || []).filter(
     (item: any) => item.status !== "valid",
   );
-  const itemsHtml = errorItems
-    .map(
-      (item: any) =>
-        `<li><strong>${item.description}</strong>${
-          item.cptCode ? ` (CPT: ${item.cptCode})` : ""
-        }: Charged $${item.chargedAmount.toFixed(2)}${
-          item.suggestedAmount !== undefined
-            ? ` — Fair rate: $${item.suggestedAmount.toFixed(2)}`
-            : ""
-        }${item.errorDescription ? `<br/><em>${item.errorDescription}</em>` : ""}</li>`,
-    )
-    .join("");
-  return `
-<h2>Medical Bill Dispute</h2>
-<p>Dear ${recipient.facility || "General Hospital"} Billing Department,</p>
-<p>I am writing on behalf of <strong>${recipient.name}</strong> to formally dispute billing errors.</p>
-<h3>Discrepancies:</h3>
-<ul>${itemsHtml}</ul>
-<p><strong>Total overcharge: $${auditResult.totalOvercharge.toFixed(2)}</strong></p>
-<p>We request these charges be reviewed and corrected.</p>
-<p>Sincerely,<br/>Maria Garcia</p>
-`.trim();
+  const inferred = templateKey || inferDisputeTemplate(errorItems);
+  return formatDisputeHtml({
+    billId: auditResult.billId || `bill-${Date.now()}`,
+    templateKey: inferred,
+    recipientInfo: {
+      name: recipient.name,
+      facility: recipient.facility || "General Hospital",
+      caregiverName: "Maria Garcia",
+      caregiverEmail: "caregiver@example.com",
+    },
+    disputedItems: errorItems,
+    totalOvercharge: auditResult.totalOvercharge,
+  });
 }

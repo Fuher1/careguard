@@ -43,6 +43,7 @@ import {
   auditBill,
   validateBillAuditRequest,
 } from "./shared/bill-audit.ts";
+import { getProviderBillHistoryStore } from "./services/bill-audit-api/history.ts";
 import { sanitizeUserString } from "./shared/sanitize.ts";
 import { registerKnownNames } from "./shared/redact.ts";
 
@@ -797,12 +798,40 @@ app.post(
         ...lineItem,
         description: sanitizeUserString(lineItem.description),
       }));
-      res.json(
-        auditBill(sanitizedLineItems, {
-          network: NETWORK,
-          payTo: process.env.BILL_PROVIDER_PUBLIC_KEY,
-        }),
-      );
+      const providerId =
+        validatedBody.providerId || (req.body?.provider_id as string | undefined);
+      const providerName =
+        validatedBody.providerName || (req.body?.provider_name as string | undefined);
+      const historyStore = getProviderBillHistoryStore();
+      let providerHistoryLookup;
+      if (providerId) {
+        providerHistoryLookup = (cptCode: string, chargedAmount: number) => {
+          return historyStore.compareAgainstHistory({
+            providerId,
+            providerName,
+            cptCode,
+            currentChargedAmount: chargedAmount,
+          });
+        };
+      }
+
+      const auditResult = auditBill(sanitizedLineItems, {
+        network: NETWORK,
+        payTo: process.env.BILL_PROVIDER_PUBLIC_KEY,
+        providerHistoryLookup,
+      });
+
+      if (providerId) {
+        historyStore.recordBillCharges({
+          providerId,
+          providerName: providerName || "Healthcare Provider",
+          recipientId:
+            validatedBody.recipientId || (req.body?.recipient_id as string | undefined),
+          lineItems: sanitizedLineItems,
+        });
+      }
+
+      res.json(auditResult);
     } catch (error) {
       if (error instanceof BillAuditValidationError) {
         const validationError = error as BillAuditValidationError;

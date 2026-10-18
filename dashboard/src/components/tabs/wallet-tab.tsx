@@ -6,6 +6,8 @@ import { truncateAddress } from "../../lib/utils";
 import { Toast } from "../primitives/toast";
 import type { AgentInfo, SpendingData } from "../types";
 import { SpendingCategoryChart } from "../spending-category-chart";
+import type { CaregiverProfile, ConsentSettings } from "../../lib/types";
+import { CostSplitSection } from "../cost-split-section";
 import { EXPLORER_ACCOUNT_URL, NETWORK_LABEL } from "../../lib/stellar-network";
 import { getTranslations, type Locale } from "../../i18n";
 
@@ -19,7 +21,11 @@ export interface WalletTabProps {
   onRetryWalletBalance?: () => void;
   /** Spending summary; when present the tab shows the category breakdown (#1185). */
   spending?: SpendingData | null;
+  loadingAgentInfo?: boolean;
   locale?: Locale;
+  currentCaregiver?: CaregiverProfile;
+  consentSettings?: ConsentSettings;
+  recipientId?: string;
 }
 
 function FundingModal({
@@ -82,13 +88,60 @@ export function WalletTab({
   loadingWalletBalance = false,
   onRetryWalletBalance,
   spending,
+  loadingAgentInfo = false,
   locale = "en",
+  currentCaregiver,
+  consentSettings,
+  recipientId,
 }: WalletTabProps) {
+  const isRestricted =
+    currentCaregiver &&
+    currentCaregiver.role &&
+    currentCaregiver.role !== "owner" &&
+    consentSettings &&
+    consentSettings[currentCaregiver.role]?.wallet === false;
+
   const t = getTranslations(locale);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
   const [toastFallback, setToastFallback] = useState<string | undefined>(undefined);
   const [fundingModalOpen, setFundingModalOpen] = useState(false);
+
+  if (isRestricted) {
+    return (
+      <div
+        role="tabpanel"
+        id="tabpanel-wallet"
+        aria-labelledby="tab-wallet"
+        tabIndex={0}
+        className="space-y-6 max-w-2xl"
+      >
+        <div className="bg-amber-50 border border-amber-200 rounded-xl p-8 text-center max-w-xl mx-auto my-12">
+          <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-amber-100 text-amber-600">
+            <svg
+              className="h-6 w-6"
+              fill="none"
+              viewBox="0 0 24 24"
+              strokeWidth={1.5}
+              stroke="currentColor"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M16.5 10.5V6.75a4.5 4.5 0 10-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 002.25-2.25v-6.75a2.25 2.25 0 00-2.25-2.25H6.75a2.25 2.25 0 00-2.25 2.25v6.75a2.25 2.25 0 002.25 2.25z"
+              />
+            </svg>
+          </div>
+          <h3 className="text-base font-semibold text-slate-800 mb-1">
+            Wallet Access Restricted
+          </h3>
+          <p className="text-sm text-slate-600">
+            The care recipient has configured consent settings that restrict viewing wallet and balance information for your caregiver role.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   const handleCopy = async (text: string, id: string) => {
     const result = await copyText(text);
@@ -283,6 +336,12 @@ export function WalletTab({
           </div>
         </div>
       </div>
+
+      <CostSplitSection
+        recipientId={recipientId || "rosa"}
+        currentCaregiverName={currentCaregiver?.name}
+        currentCaregiverId={currentCaregiver?.id}
+      />
     </div>
   );
 }
