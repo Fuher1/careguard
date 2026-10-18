@@ -57,6 +57,17 @@ import {
 import { loadPresenceMap, recordItemView } from "./shared/presence.ts";
 import { extractLineItemsFromBillImage } from "./shared/bill-ocr.ts";
 import { runPriceWatchForRecipient } from "./agent/price-watch.ts";
+import {
+  loadMultisigConfig,
+  saveMultisigConfig,
+  loadMultisigRequests,
+  signAndSubmitMultisigRequest,
+  rejectMultisigRequest,
+} from "./shared/multisig.ts";
+import {
+  recordDosageChange,
+  getMedicationHistory,
+} from "./shared/medication-history.ts";
 
 // Observability
 import { requestLifecycleMiddleware } from "./shared/request-lifecycle.ts";
@@ -1192,6 +1203,158 @@ app.post(
     }
   },
 );
+
+// --- Allergies endpoints (#1230) ---
+app.get("/agent/allergies", (req, res) => {
+  const recipientId = (req.query.recipient_id as string) || (req.query.recipientId as string) || "rosa";
+  res.json({ allergies: loadRecipientAllergies(recipientId), recipientId });
+});
+
+app.post("/agent/allergies", (req, res) => {
+  const recipientId = (req.query.recipient_id as string) || (req.body.recipientId as string) || "rosa";
+  const { substance, severity, reaction, notes } = req.body ?? {};
+  if (!substance || !severity) {
+    return res.status(400).json({ error: "substance and severity are required" });
+  }
+  const created = addRecipientAllergy({ substance, severity, reaction, notes }, recipientId);
+  res.status(201).json(created);
+});
+
+app.delete("/agent/allergies/:id", (req, res) => {
+  const recipientId = (req.query.recipient_id as string) || "rosa";
+  const success = removeRecipientAllergy(req.params.id, recipientId);
+  res.json({ success });
+});
+
+// --- Co-Caregiver Presence endpoints (#1231) ---
+app.get("/agent/presence", (req, res) => {
+  const recipientId = (req.query.recipient_id as string) || (req.query.recipientId as string) || "rosa";
+  res.json({ presence: loadPresenceMap(recipientId), recipientId });
+});
+
+app.post("/agent/presence/view", (req, res) => {
+  const { itemId, itemType, caregiverId, caregiverName, avatar, recipientId } = req.body ?? {};
+  if (!itemId || !itemType || !caregiverId || !caregiverName) {
+    return res.status(400).json({ error: "itemId, itemType, caregiverId, and caregiverName are required" });
+  }
+  const entry = recordItemView({
+    itemId,
+    itemType,
+    caregiverId,
+    caregiverName,
+    avatar,
+    recipientId,
+  });
+  res.json({ success: true, entry });
+});
+
+// --- Bill OCR endpoint (#1229) ---
+app.post("/bill/ocr", async (req, res) => {
+  const { image } = req.body ?? {};
+  if (!image || typeof image !== "string") {
+    return res.status(400).json({ error: "image (base64) is required" });
+  }
+  try {
+    const result = await extractLineItemsFromBillImage(image);
+    res.json(result);
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || "OCR extraction failed" });
+  }
+});
+
+// --- Price watch endpoint (#1236) ---
+app.post("/agent/price-watch/run", async (req, res) => {
+  const recipientId = (req.query.recipient_id as string) || "rosa";
+  try {
+    const result = await runPriceWatchForRecipient(recipientId);
+    res.json(result);
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || "Price watch failed" });
+  }
+});
+
+// --- Multisig endpoints (#1226) ---
+app.get("/agent/multisig/config", (req, res) => {
+  const recipientId = (req.query.recipient_id as string) || (req.query.recipientId as string) || "rosa";
+  res.json(loadMultisigConfig(recipientId));
+});
+
+app.post("/agent/multisig/config", (req, res) => {
+  const recipientId = (req.query.recipient_id as string) || (req.body.recipientId as string) || "rosa";
+  const { enabled, thresholdAmount, coSigners, timeWindowHours } = req.body ?? {};
+  const current = loadMultisigConfig(recipientId);
+  const updated = {
+    recipientId,
+    enabled: typeof enabled === "boolean" ? enabled : current.enabled,
+    thresholdAmount: typeof thresholdAmount === "number" ? thresholdAmount : current.thresholdAmount,
+    coSigners: Array.isArray(coSigners) ? coSigners : current.coSigners,
+    timeWindowHours: typeof timeWindowHours === "number" ? timeWindowHours : current.timeWindowHours,
+  };
+  saveMultisigConfig(updated, recipientId);
+  res.json({ success: true, config: updated });
+});
+
+app.get("/agent/multisig/pending", (req, res) => {
+  const recipientId = (req.query.recipient_id as string) || (req.query.recipientId as string) || "rosa";
+  const requests = loadMultisigRequests(recipientId);
+  res.json({ requests, count: requests.length, recipientId });
+});
+
+app.post("/agent/multisig/sign", async (req, res) => {
+  const { requestId, signerSecretOrSignedXdr, recipientId = "rosa" } = req.body ?? {};
+  if (!requestId || !signerSecretOrSignedXdr) {
+    return res.status(400).json({ error: "requestId and signerSecretOrSignedXdr are required" });
+  }
+  try {
+    const result = await signAndSubmitMultisigRequest(requestId, signerSecretOrSignedXdr, recipientId);
+    res.json(result);
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || "Failed to sign multisig request" });
+  }
+});
+
+app.post("/agent/multisig/reject", (req, res) => {
+  const { requestId, reason, recipientId = "rosa" } = req.body ?? {};
+  if (!requestId) {
+    return res.status(400).json({ error: "requestId is required" });
+  }
+  try {
+    const result = rejectMultisigRequest(requestId, reason, recipientId);
+    res.json(result);
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || "Failed to reject multisig request" });
+  }
+});
+
+// --- Medication Dosage History endpoints (#1227) ---
+app.get("/agent/medications/history", (req, res) => {
+  const recipientId = (req.query.recipient_id as string) || (req.query.recipientId as string) || "rosa";
+  const medicationName = (req.query.medication_name as string) || (req.query.medicationName as string) || undefined;
+  const history = getMedicationHistory(recipientId, medicationName);
+  res.json({ history, recipientId });
+});
+
+app.post("/agent/medications/dosage", (req, res) => {
+  const { recipientId = "rosa", medicationName, newDosage, newFrequency, reason, prescriber } = req.body ?? {};
+  if (!medicationName || !newDosage || !newFrequency) {
+    return res.status(400).json({ error: "medicationName, newDosage, and newFrequency are required" });
+  }
+  try {
+    const entry = recordDosageChange(
+      {
+        medicationName,
+        newDosage,
+        newFrequency,
+        reason,
+        prescriber,
+      },
+      recipientId,
+    );
+    res.status(201).json({ success: true, entry });
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || "Failed to record dosage change" });
+  }
+});
 
 // ============================================================
 // START

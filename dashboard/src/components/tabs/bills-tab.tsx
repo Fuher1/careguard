@@ -279,13 +279,13 @@ export function BillsTab({
 
           // Simple Medicare reference comparison
           if (it.cptCode === "99284" && it.chargedAmount > 450) {
-            status = "overcharged";
+            status = "upcoded";
             suggestedAmount = 385.0;
             errorDescription = "Charge exceeds Medicare fair market rate by over 300%";
             totalOvercharge += it.chargedAmount - suggestedAmount;
             errorsFound++;
           } else if (it.cptCode === "80053" && it.chargedAmount > 100) {
-            status = "overcharged";
+            status = "upcoded";
             suggestedAmount = 45.0;
             errorDescription = "Standard metabolic panel fair market rate is $45";
             totalOvercharge += it.chargedAmount - suggestedAmount;

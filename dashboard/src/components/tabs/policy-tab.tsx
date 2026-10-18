@@ -11,16 +11,18 @@ import { POLICY_FIELD_T_KEY as FIELD_T_KEY } from "../../lib/policy-field-labels
 import type { SpendingData } from "../types";
 import { Bar } from "../primitives/bar";
 import { Toast } from "../primitives/toast";
+import { ContextualHelp } from "../primitives/contextual-help";
 import { getTranslations, type Locale } from "../../i18n";
 import { agentFetch } from "../../lib/agent-fetch";
 
-const FIELDS: Array<keyof SpendingPolicyInput> = [
-  "dailyLimit",
-  "monthlyLimit",
-  "medicationMonthlyBudget",
-  "billMonthlyBudget",
-  "approvalThreshold",
-  "holdTimeSeconds",
+const FIELDS: Array<[keyof SpendingPolicyInput, string]> = [
+  ["dailyLimit", "Daily Spending Limit ($)"],
+  ["monthlyLimit", "Monthly Spending Limit ($)"],
+  ["medicationMonthlyBudget", "Medication Monthly Budget ($)"],
+  ["billMonthlyBudget", "Bill Monthly Budget ($)"],
+  ["approvalThreshold", "Caregiver Approval Threshold ($)"],
+  ["holdTimeSeconds", "Hold Time Before Auto-Approval (seconds)"],
+  ["severityThreshold", "Drug Interaction Severity Threshold"],
 ];
 
 /** Helper text for fields (#1270) — real-world context to guide non-technical caregivers. */
@@ -35,14 +37,15 @@ const FIELD_HELPERS: Record<string, string> = {
 /** Per-field HTML input constraints — kept in sync with schemas.ts (#211). */
 const FIELD_CONFIG: Record<
   keyof SpendingPolicyInput,
-  { min: number; max: number; step: number }
+  { min?: number; max?: number; step?: number }
 > = {
   dailyLimit: { min: 1, max: 50000, step: 1 },
   monthlyLimit: { min: 1, max: 50000, step: 1 },
   medicationMonthlyBudget: { min: 1, max: 50000, step: 1 },
-  billMonthlyBudget: { min: 1, max: 50000, step: 1 },
-  approvalThreshold: { min: 1, max: 50000, step: 1 },
-  holdTimeSeconds: { min: 0, max: 86400, step: 1 },
+  billMonthlyBudget:       { min: 1, max: 50000, step: 1 },
+  approvalThreshold:       { min: 1, max: 50000, step: 1 },
+  holdTimeSeconds:         { min: 0, max: 86400, step: 1 },
+  severityThreshold:       {},
 };
 
 /**
@@ -284,9 +287,12 @@ export function PolicyTab({
       tabIndex={0}
       className="bg-white rounded-xl border border-slate-200 p-6 max-w-lg"
     >
-      <h2 className="text-sm font-semibold text-slate-700 mb-4">
-        {t.policy.title.replace("Rosa", recipient.name)}
-      </h2>
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="text-sm font-semibold text-slate-700 flex items-center">
+          {t.policy.title.replace("Rosa", recipient.name)}
+          <ContextualHelp topicKey="policy_block" caregiverId="caregiver" />
+        </h2>
+      </div>
       <p className="text-xs text-slate-500 mb-6">
         {t.policy.description}
       </p>
@@ -303,32 +309,55 @@ export function PolicyTab({
                 htmlFor={inputId}
                 className="block text-xs font-medium text-slate-600 mb-1"
               >
-                {label}
+                <span className="inline-flex items-center">
+                  {label}
+                  {key === "approvalThreshold" && (
+                    <ContextualHelp topicKey="approval_threshold" caregiverId="caregiver" />
+                  )}
+                  {key === "dailyLimit" && (
+                    <ContextualHelp topicKey="policy_block" caregiverId="caregiver" />
+                  )}
+                </span>
               </label>
-              <input
-                id={inputId}
-                type="number"
-                inputMode="decimal"
-                min={FIELD_CONFIG[key].min}
-                max={FIELD_CONFIG[key].max}
-                step={FIELD_CONFIG[key].step}
-                value={Number.isFinite(policyForm[key]) ? policyForm[key] : ""}
-                aria-invalid={Boolean(errMsg)}
-                aria-describedby={errMsg || warnMsg ? errorId : undefined}
-                onChange={(e) => {
-                  setPolicyDirty(true);
-                  const raw = e.target.value;
-                  const parsed = raw === "" ? Number.NaN : Number(raw);
-                  if (debounceRef.current) clearTimeout(debounceRef.current);
-                  debounceRef.current = setTimeout(() => {
+              {key === "severityThreshold" ? (
+                <select
+                  id={inputId}
+                  value={String(policyForm[key] ?? "any")}
+                  onChange={(e) => {
+                    setPolicyDirty(true);
+                    setPolicyForm((p) => ({ ...p, [key]: e.target.value }));
+                  }}
+                  className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-sky-500"
+                >
+                  <option value="any">Any interaction (default conservative block)</option>
+                  <option value="major">Block only on major/severe interactions</option>
+                  <option value="moderate">Block on moderate or worse</option>
+                  <option value="mild">Block on mild or worse</option>
+                </select>
+              ) : (
+                <input
+                  id={inputId}
+                  type="number"
+                  inputMode="decimal"
+                  min={FIELD_CONFIG[key].min}
+                  max={FIELD_CONFIG[key].max}
+                  step={FIELD_CONFIG[key].step}
+                  value={Number.isFinite(policyForm[key]) ? policyForm[key] : ""}
+                  aria-invalid={Boolean(errMsg)}
+                  aria-describedby={errMsg || warnMsg ? errorId : undefined}
+                  onChange={(e) => {
+                    setPolicyDirty(true);
+                    const raw = e.target.value;
+                    const parsed = raw === "" ? Number.NaN : Number(raw);
                     setPolicyForm((p) => ({ ...p, [key]: parsed }));
-                  }, 300);
-                }}
-                className={`w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 ${errMsg
-                    ? "border-red-400 focus:ring-red-500"
-                    : "border-slate-300 focus:ring-sky-500"
+                  }}
+                  className={`w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 ${
+                    errMsg
+                      ? "border-red-400 focus:ring-red-500"
+                      : "border-slate-300 focus:ring-sky-500"
                   }`}
-              />
+                />
+              )}
               {errMsg && (
                 <p id={errorId} className="mt-1 text-xs text-red-600">
                   {errMsg}
@@ -525,6 +554,9 @@ export function PolicyTab({
               {impactState?.status === "ready" && (
                 <>
                   <p className="text-slate-700">{describePolicyImpact(impactState.impact)}</p>
+                  {impactState.impact.newlyBlocked > 0 && (
+                    <ContextualHelp topicKey="policy_block" variant="inline" className="mt-2 mb-2" />
+                  )}
                   {impactState.impact.entries.some((e) => e.changed) && (
                     <ul className="mt-2 space-y-1">
                       {impactState.impact.entries

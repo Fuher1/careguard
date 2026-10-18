@@ -243,6 +243,23 @@ auditRouter.get("/", requireAdmin, (req: Request, res: Response) => {
   }
 });
 
+export function readAuditLog(): Array<{ event: string; actor: string; details?: any; timestamp: string }> {
+  const filePath = getAuditFilePath();
+  if (!existsSync(filePath)) return [];
+  const content = readFileSync(filePath, "utf-8");
+  return content
+    .trim()
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => {
+      try {
+        return JSON.parse(line);
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean);
+}
 // ── Caregiver-facing audit export (Feature: accountability report) ────────────
 
 /**

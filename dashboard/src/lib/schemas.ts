@@ -9,6 +9,7 @@ export const SpendingPolicyInput = z.object({
   billMonthlyBudget: z.number(),
   approvalThreshold: z.number(),
   holdTimeSeconds: z.number(),
+  severityThreshold: z.enum(['any', 'major', 'moderate', 'mild']).default('any'),
 });
 
 export type SpendingPolicyInput = z.infer<typeof SpendingPolicyInput>;
@@ -24,16 +25,15 @@ export type PolicyValidation = {
   isValid: boolean;
 };
 
-// Validation messages use the English labels — same source of truth
-// (POLICY_FIELD_T_KEY + translation entries) that policy-tab.tsx uses to
-// render the field labels the caregiver actually sees (#1144).
-const enPolicy = getTranslations('en').policy;
-const FIELD_LABEL: Record<keyof SpendingPolicyInput, string> = Object.fromEntries(
-  (Object.keys(POLICY_FIELD_T_KEY) as Array<keyof SpendingPolicyInput>).map((field) => [
-    field,
-    enPolicy[POLICY_FIELD_T_KEY[field] as keyof typeof enPolicy],
-  ]),
-) as Record<keyof SpendingPolicyInput, string>;
+const FIELD_LABEL: Record<keyof SpendingPolicyInput, string> = {
+  dailyLimit: 'Daily limit',
+  monthlyLimit: 'Monthly limit',
+  medicationMonthlyBudget: 'Medication budget',
+  billMonthlyBudget: 'Bill budget',
+  approvalThreshold: 'Approval threshold',
+  holdTimeSeconds: 'Hold time before auto-approval (seconds)',
+  severityThreshold: 'Drug interaction severity threshold',
+};
 
 export function validatePolicy(input: unknown): PolicyValidation {
   const errors: PolicyFieldError[] = [];
@@ -62,7 +62,7 @@ export function validatePolicy(input: unknown): PolicyValidation {
     'approvalThreshold',
   ];
   // holdTimeSeconds may be 0 (no hold), money fields must be ≥ 1 (#211)
-  const allFields: (keyof SpendingPolicyInput)[] = [...moneyFields, 'holdTimeSeconds'];
+  const allFields: (keyof SpendingPolicyInput)[] = [...moneyFields, 'holdTimeSeconds', 'severityThreshold'];
 
   for (const f of allFields) {
     if (!Number.isFinite(v[f])) {

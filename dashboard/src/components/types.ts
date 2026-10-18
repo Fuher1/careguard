@@ -22,6 +22,7 @@ export interface AgentResult {
   };
   events?: AgentEvent[];
   error?: AgentLlmError;
+  truncated?: boolean;
 }
 
 export interface AgentInfo {

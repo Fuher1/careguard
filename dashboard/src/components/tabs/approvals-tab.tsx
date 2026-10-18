@@ -1,11 +1,11 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import type { Transaction, CaregiverProfile } from "../types";
+import type { Transaction } from "../types";
 import { formatDateTime, type Locale, getTranslations } from "../../i18n";
 import { AGENT_URL } from "../../lib/agent-url";
 import { agentFetch } from "../../lib/agent-fetch";
-import type { ItemPresenceMap } from "../../lib/types";
+import type { ItemPresenceMap, CaregiverProfile } from "../../lib/types";
 
 /** Who is deciding, and whose authority they use when delegated (#1195). */
 export interface ApprovalActor {

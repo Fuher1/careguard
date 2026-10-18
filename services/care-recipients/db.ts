@@ -74,29 +74,14 @@ export interface CareRecipientRecord {
   insurance: string | null;
 }
 
-/** A non-payment caregiving task for one recipient (Issue #1200). */
-export interface CareTaskEntity {
+export interface SideEffectEntry {
   id: string;
   recipient_id: string;
-  title: string;
-  /** Name of the linked caregiver it's assigned to, or null if unassigned. */
-  assignee: string | null;
-  /** Due date as YYYY-MM-DD, or null. */
-  due_date: string | null;
-  done: boolean;
-  completed_at: string | null;
-  created_at: string;
+  medication_id: string;
+  description: string;
+  severity: 'mild' | 'moderate' | 'severe';
+  timestamp: string;
 }
-
-interface CareTaskRow extends Omit<CareTaskEntity, 'done'> {
-  done: number;
-}
-
-function rowToTask(row: CareTaskRow): CareTaskEntity {
-  return { ...row, done: row.done === 1 };
-}
-/** Backward-compatibility alias for CareRecipientRecord (Issue #1067) */
-export type CareRecipientEntity = CareRecipientRecord;
 
 export type CareRecipientInput = Omit<CareRecipientEntity, 'id'>;
 
@@ -351,34 +336,17 @@ export class CareRecipientsStore {
       CREATE INDEX IF NOT EXISTS idx_cost_splits_tx
         ON cost_splits (transaction_id);
     `);
-    this.migrateLegacyCaregiverColumn();
-  }
 
-  /**
-   * Migration path (#1179): databases created before the join table stored a
-   * single care_recipients.caregiver_user_id. Each non-empty value becomes an
-   * active 'owner' link, then the column is dropped. Runs at most once (the
-   * column no longer exists afterwards) and is atomic.
-   */
-  private migrateLegacyCaregiverColumn(): void {
-    const columns = this.db.prepare('PRAGMA table_info(care_recipients)').all() as Array<{ name: string }>;
-    if (!columns.some((column) => column.name === 'caregiver_user_id')) return;
-
-    const migratedAt = new Date().toISOString();
-    this.transaction(() => {
-      const result = this.db.prepare(`
-        INSERT OR IGNORE INTO care_recipient_caregivers
-          (recipient_id, caregiver_user_id, role, status, created_at, accepted_at)
-        SELECT id, caregiver_user_id, 'owner', 'active', ?, ?
-        FROM care_recipients
-        WHERE caregiver_user_id IS NOT NULL AND caregiver_user_id <> ''
-      `).run(migratedAt, migratedAt);
-      this.db.exec('ALTER TABLE care_recipients DROP COLUMN caregiver_user_id');
-      logger.info(
-        { migratedOwners: Number(result.changes) },
-        '[care-recipients] migrated caregiver_user_id into care_recipient_caregivers',
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS side_effect_entries (
+        id TEXT PRIMARY KEY,
+        recipient_id TEXT NOT NULL,
+        medication_id TEXT NOT NULL,
+        description TEXT NOT NULL,
+        severity TEXT NOT NULL CHECK (severity IN ('mild', 'moderate', 'severe')),
+        timestamp TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
       );
-    });
+    `);
   }
 
   private seedIfEmpty(): void {
@@ -435,41 +403,12 @@ export class CareRecipientsStore {
     return this.getById(id)!;
   }
 
-  /** Open tasks first (soonest due, undated last), then completed ones newest first. */
-  listTasks(recipientId: string): CareTaskEntity[] {
-    const rows = this.db
-      .prepare(`
-        SELECT * FROM care_tasks WHERE recipient_id = ?
-        ORDER BY done ASC,
-                 CASE WHEN done = 0 THEN due_date IS NULL END ASC,
-                 CASE WHEN done = 0 THEN due_date END ASC,
-                 completed_at DESC,
-                 created_at ASC
-      `)
-      .all(recipientId) as CareTaskRow[];
-    return rows.map(rowToTask);
-  }
-
-  createTask(recipientId: string, input: NewCareTask): CareTaskEntity {
-    const id = `task_${Date.now()}_${randomUUID().slice(0, 8)}`;
-    this.db.prepare(`
-      INSERT INTO care_tasks (id, recipient_id, title, assignee, due_date, done, created_at)
-      VALUES (?, ?, ?, ?, ?, 0, ?)
-    `).run(id, recipientId, input.title, input.assignee ?? null, input.due_date ?? null, new Date().toISOString());
-    return this.getTask(id)!;
-  }
-
-  /** Marks a task done (kept for history) or reopens it. */
-  setTaskDone(recipientId: string, taskId: string, done: boolean): CareTaskEntity | undefined {
-    const result = this.db
-      .prepare('UPDATE care_tasks SET done = ?, completed_at = ? WHERE id = ? AND recipient_id = ?')
-      .run(done ? 1 : 0, done ? new Date().toISOString() : null, taskId, recipientId);
-    return Number(result.changes) === 0 ? undefined : this.getTask(taskId);
-  }
-
-  private getTask(id: string): CareTaskEntity | undefined {
-    const row = this.db.prepare('SELECT * FROM care_tasks WHERE id = ?').get(id) as CareTaskRow | undefined;
-    return row ? rowToTask(row) : undefined;
+  listSideEffectEntries(recipientId: string, medicationId?: string): SideEffectEntry[] {
+    const sql = medicationId
+      ? 'SELECT * FROM side_effect_entries WHERE recipient_id = ? AND medication_id = ? ORDER BY timestamp DESC'
+      : 'SELECT * FROM side_effect_entries WHERE recipient_id = ? ORDER BY timestamp DESC';
+    const params = medicationId ? [recipientId, medicationId] : [recipientId];
+    return this.db.prepare(sql).all(...params) as SideEffectEntry[];
   }
 
   // ── Caregiver links (#1179) ─────────────────────────────────────────────────
@@ -645,52 +584,13 @@ export class CareRecipientsStore {
     ends_at: string;
   }): ApprovalDelegation {
     const id = `dlg_${randomUUID()}`;
+  addSideEffectEntry(entry: Omit<SideEffectEntry, 'id'>): SideEffectEntry {
+    const id = `${entry.recipient_id}-${entry.medication_id}-${Date.now()}`;
     this.db.prepare(`
-      INSERT INTO approval_delegations (id, recipient_id, delegator, delegate, starts_at, ends_at, revoked_at, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, NULL, ?)
-    `).run(id, input.recipient_id, input.delegator, input.delegate, input.starts_at, input.ends_at, new Date().toISOString());
-    return this.getDelegation(id)!;
-  }
-
-  getDelegation(id: string): ApprovalDelegation | undefined {
-    return this.db.prepare('SELECT * FROM approval_delegations WHERE id = ?').get(id) as ApprovalDelegation | undefined;
-  }
-
-  listDelegations(recipientId: string): ApprovalDelegation[] {
-    return this.db
-      .prepare('SELECT * FROM approval_delegations WHERE recipient_id = ? ORDER BY starts_at DESC')
-      .all(recipientId) as ApprovalDelegation[];
-  }
-
-  /** The delegation letting `delegate` act for `delegator` on this recipient right now, if any. */
-  findActiveDelegation(recipientId: string, delegator: string, delegate: string, now: Date = new Date()): ApprovalDelegation | undefined {
-    const iso = now.toISOString();
-    return this.db.prepare(`
-      SELECT * FROM approval_delegations
-      WHERE recipient_id = ? AND delegator = ? AND delegate = ?
-        AND revoked_at IS NULL AND starts_at <= ? AND ends_at > ?
-      ORDER BY ends_at DESC LIMIT 1
-    `).get(recipientId, delegator, delegate, iso, iso) as ApprovalDelegation | undefined;
-  }
-
-  /** Active delegations held by `delegate` on this recipient (for the approvals banner). */
-  listActiveDelegationsFor(recipientId: string, delegate: string, now: Date = new Date()): ApprovalDelegation[] {
-    const iso = now.toISOString();
-    return this.db.prepare(`
-      SELECT * FROM approval_delegations
-      WHERE recipient_id = ? AND delegate = ?
-        AND revoked_at IS NULL AND starts_at <= ? AND ends_at > ?
-      ORDER BY ends_at ASC
-    `).all(recipientId, delegate, iso, iso) as ApprovalDelegation[];
-  }
-
-  /** Revoke early. Only the delegator may revoke; returns the updated row or undefined if not theirs/already ended. */
-  revokeDelegation(id: string, delegator: string, now: Date = new Date()): ApprovalDelegation | undefined {
-    const result = this.db.prepare(`
-      UPDATE approval_delegations SET revoked_at = ?
-      WHERE id = ? AND delegator = ? AND revoked_at IS NULL AND ends_at > ?
-    `).run(now.toISOString(), id, delegator, now.toISOString());
-    return result.changes > 0 ? this.getDelegation(id) : undefined;
+      INSERT INTO side_effect_entries (id, recipient_id, medication_id, description, severity, timestamp)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(id, entry.recipient_id, entry.medication_id, entry.description, entry.severity, entry.timestamp);
+    return { id, ...entry };
   }
 
   // ── Granular Data-Sharing Consent (#1218) ───────────────────────────────────
