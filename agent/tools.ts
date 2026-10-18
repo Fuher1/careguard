@@ -3388,13 +3388,12 @@ export function generateDisputeLetter(
 
 // --- Tool: Adherence status (Issue #264) ---
 export function getAdherenceStatus(recipientId: string = "rosa") {
+  // Read adherence log once; summary already contains pendingNow and flaggedRecords (#1042).
   const summary = getAdherenceSummary(recipientId);
-  const pending = getPendingAdherences(recipientId);
-  const flagged = getFlaggedAdherences(recipientId);
   return {
     ...summary,
-    pendingReminders: pending.length,
-    flaggedReminders: flagged,
+    pendingReminders: summary.pendingNow.length,
+    flaggedReminders: summary.flaggedRecords,
   };
 }
 
