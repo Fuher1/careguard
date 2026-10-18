@@ -517,7 +517,18 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
     runToolCalls += message.tool_calls.length;
 
     for (const toolCall of message.tool_calls) {
-      if (toolCall.type !== "function") continue;
+      if (toolCall.type !== "function") {
+        // The OpenAI-compatible API requires one tool-role response per tool_call id
+        // in the preceding assistant message. Silently skipping would leave the
+        // conversation in an invalid state and cause the next completion to 400 (#1037).
+        logger.warn({ toolCallType: toolCall.type, toolCallId: toolCall.id }, "unsupported tool_call type — emitting error stub");
+        messages.push({
+          role: "tool",
+          tool_call_id: toolCall.id,
+          content: JSON.stringify({ ok: false, error: `Unsupported tool_call type: ${toolCall.type}` }),
+        });
+        continue;
+      }
       const fnName = toolCall.function.name;
       let fnArgs: any;
       try {
