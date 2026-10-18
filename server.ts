@@ -289,6 +289,12 @@ let _profileData = {
   caregiver: { ..._DEFAULT_PROFILE.caregiver },
 };
 
+// Multi-recipient store (#1028) — seeded from the default profile so
+// recipient_id=rosa resolves on the unified server just like agent/server.ts.
+const _recipientProfiles: Record<string, typeof _DEFAULT_PROFILE.recipient> = {
+  rosa: { ..._DEFAULT_PROFILE.recipient, medications: [..._DEFAULT_PROFILE.recipient.medications] },
+};
+
 // --- Express App ---
 const app: Express = express();
 let isDraining = false;
@@ -451,6 +457,40 @@ app.patch("/agent/profile", (req, res) => {
     }
   }
   res.json(_profileData);
+});
+
+// --- Multi-recipient endpoints (#1028) ---
+app.get("/agent/recipients", (_req, res) => {
+  res.json({
+    recipients: Object.keys(_recipientProfiles),
+    profiles: _recipientProfiles,
+  });
+});
+
+app.put("/agent/recipients/:recipientId", (req, res) => {
+  const { recipientId } = req.params;
+  const { name, age, medications, doctor, insurance } = req.body ?? {};
+  if (!_recipientProfiles[recipientId]) {
+    _recipientProfiles[recipientId] = {
+      ..._DEFAULT_PROFILE.recipient,
+      name: recipientId,
+      medications: [],
+    };
+  }
+  if (name) {
+    _recipientProfiles[recipientId].name = name;
+    registerKnownNames([name]);
+  }
+  if (typeof age === "number") _recipientProfiles[recipientId].age = age;
+  if (Array.isArray(medications))
+    _recipientProfiles[recipientId].medications = medications;
+  if (doctor) (_recipientProfiles[recipientId] as Record<string, unknown>).doctor = doctor;
+  if (insurance) (_recipientProfiles[recipientId] as Record<string, unknown>).insurance = insurance;
+  // Keep rosa profile in sync with _profileData for the legacy single-profile route.
+  if (recipientId === "rosa") {
+    _profileData.recipient = { ..._recipientProfiles.rosa };
+  }
+  res.json({ success: true, recipient: _recipientProfiles[recipientId] });
 });
 
 // ============================================================

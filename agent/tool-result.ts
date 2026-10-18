@@ -2,6 +2,8 @@ import { randomUUID } from "crypto";
 
 const DEFAULT_RESULT_SIZE_LIMIT = 8 * 1024;
 const DEFAULT_SAMPLE_SIZE = 10;
+// Hard cap on caller-supplied limit for fetch_tool_result (#1036).
+export const FETCH_TOOL_RESULT_MAX_LIMIT = 100;
 
 type StoredToolResult = {
   toolName: string;
@@ -100,6 +102,7 @@ export function fetchToolResult(
   offset = 0,
   limit = DEFAULT_SAMPLE_SIZE,
 ): Record<string, unknown> {
+  limit = Math.min(limit, FETCH_TOOL_RESULT_MAX_LIMIT);
   const stored = toolResultStore.get(resultId);
   if (!stored) {
     return {

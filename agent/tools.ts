@@ -139,6 +139,7 @@ import {
   extractLineItemsFromBillImage,
   type OcrExtractionResult,
 } from "../shared/bill-ocr.ts";
+import { FETCH_TOOL_RESULT_MAX_LIMIT } from "./tool-result.ts";
 
 assertMockNetworkAllowed();
 
@@ -3196,7 +3197,7 @@ const TOOL_INPUT_SCHEMAS = {
     .object({
       result_id: z.string().min(1),
       offset: z.number().int().nonnegative().optional(),
-      limit: z.number().int().positive().optional(),
+      limit: z.number().int().positive().max(FETCH_TOOL_RESULT_MAX_LIMIT).optional(),
     })
     .strict(),
   pay_for_medication: z
@@ -3377,7 +3378,7 @@ export const TOOL_DEFINITIONS = [
   {
     name: "fetch_tool_result",
     description:
-      "Fetch the remainder of a previously truncated tool result by result_id. Use this when a tool response includes resultId, summary, or hasMore=true and you need the full data before concluding.",
+      `Fetch the remainder of a previously truncated tool result by result_id. Use this when a tool response includes resultId, summary, or hasMore=true and you need the full data before concluding. Maximum limit is ${FETCH_TOOL_RESULT_MAX_LIMIT} items per page.`,
     input_schema: strictInputSchema({
       type: "object" as const,
       properties: {
