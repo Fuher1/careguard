@@ -1,7 +1,6 @@
 "use client";
 
-import { useState, useEffect, useMemo } from "react";
-import { toast } from "sonner";
+import { useEffect, useState } from "react";
 import { downloadMedicationPDF } from "../../app/pdf";
 import {
   DrugInteractionResultSchema,
@@ -19,6 +18,20 @@ import { agentFetch } from "../../lib/agent-fetch";
 import { ContextualHelp } from "../primitives/contextual-help";
 
 const DEFAULT_MEDS = ["Lisinopril", "Metformin", "Atorvastatin", "Amlodipine"] as const;
+
+type SideEffectEntry = {
+  id: string;
+  recipientId: string;
+  medicationId: string;
+  description: string;
+  severity: "mild" | "moderate" | "severe";
+  timestamp: string;
+};
+
+const DEFAULT_SIDE_EFFECT_FORM = {
+  description: "",
+  severity: "mild" as const,
+};
 
 export interface MedicationsTabProps {
   agentResult: AgentResult | null;
@@ -49,6 +62,49 @@ export function MedicationsTab({
   const interactionCalls = agentResult?.toolCalls.filter(
     (tc) => tc.tool === "check_drug_interactions",
   );
+  const medications = Array.from(new Set([...(recipient.medications ?? []), ...MEDS]));
+  const storageKey = `careguard-side-effects-${recipient.name?.toLowerCase().replace(/\s+/g, "-") || "recipient"}`;
+  const [entries, setEntries] = useState<Record<string, SideEffectEntry[]>>(() => {
+    if (typeof window === "undefined") return {};
+    try {
+      const raw = window.localStorage.getItem(storageKey);
+      return raw ? JSON.parse(raw) : {};
+    } catch {
+      return {};
+    }
+  });
+  const [forms, setForms] = useState<Record<string, typeof DEFAULT_SIDE_EFFECT_FORM>>(() =>
+    Object.fromEntries(medications.map((med) => [med, { ...DEFAULT_SIDE_EFFECT_FORM }]))
+  );
+
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(storageKey, JSON.stringify(entries));
+    }
+  }, [entries, storageKey]);
+
+  function addEntry(medicationId: string) {
+    const value = forms[medicationId]?.description?.trim();
+    if (!value) return;
+    const nextEntry: SideEffectEntry = {
+      id: `${medicationId}-${Date.now()}`,
+      recipientId: recipient.name,
+      medicationId,
+      description: value,
+      severity: forms[medicationId]?.severity ?? "mild",
+      timestamp: new Date().toISOString(),
+    };
+    setEntries((prev) => ({
+      ...prev,
+      [medicationId]: [...(prev[medicationId] ?? []), nextEntry].sort((a, b) =>
+        new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime(),
+      ),
+    }));
+    setForms((prev) => ({
+      ...prev,
+      [medicationId]: { ...DEFAULT_SIDE_EFFECT_FORM },
+    }));
+  }
 
   // --- Allergies State (Issue #1230) ---
   const [allergies, setAllergies] = useState<RecipientAllergy[]>([
@@ -287,27 +343,22 @@ export function MedicationsTab({
           <div className="flex flex-col items-end gap-1">
             <button
               onClick={() => {
-                if (!hasPriceResults) return;
-                try {
-                  const priceResults = agentResult!.toolCalls
-                    .filter((tc) => tc.tool === "compare_pharmacy_prices")
-                    .map((tc) => PharmacyCompareResultSchema.parse(tc.result));
-                  const interactionResult = agentResult!.toolCalls.find(
-                    (tc) => tc.tool === "check_drug_interactions",
-                  )?.result;
-                  downloadMedicationPDF(
-                    {
-                      priceResults,
-                      interactionResult: interactionResult
-                        ? DrugInteractionResultSchema.parse(interactionResult)
-                        : undefined,
-                      allergies,
-                    },
-                    { recipient, vitals },
-                  );
-                } catch {
-                  toast.error("Couldn't parse medication result — try again");
-                }
+                const priceResults = agentResult!.toolCalls
+                  .filter((t) => t.tool === "compare_pharmacy_prices")
+                  .map((t) => PharmacyCompareResultSchema.parse(t.result));
+                const interactionResult = agentResult!.toolCalls.find(
+                  (t) => t.tool === "check_drug_interactions",
+                )?.result;
+                downloadMedicationPDF(
+                  {
+                    priceResults,
+                    interactionResult: interactionResult
+                      ? DrugInteractionResultSchema.parse(interactionResult)
+                      : undefined,
+                    sideEffectEntries: Object.values(entries).flat(),
+                  },
+                  { recipient },
+                );
               }}
               disabled={!hasPriceResults}
               title={hasPriceResults ? undefined : t.downloadPdfHint}
@@ -324,88 +375,84 @@ export function MedicationsTab({
           </div>
         </div>
 
-        <div className="space-y-4">
-          {DEFAULT_MEDS.map((drug) => {
+        <div className="space-y-3">
+          {medications.map((drug) => {
             const r = agentResult?.toolCalls.find(
               (tc) =>
                 tc.tool === "compare_pharmacy_prices" &&
                 tc.result?.drug?.toLowerCase() === drug.toLowerCase(),
             )?.result;
-            const isOptedOut = optOutMeds.includes(drug);
-
-            const drugHistory = dosageHistory.filter(
-              (h) => h.medicationName?.toLowerCase() === drug.toLowerCase(),
-            );
-            const activeEntry = drugHistory[0];
-            const activeDosage = activeEntry?.newDosage || "Standard Dose";
-            const activeFrequency = activeEntry?.newFrequency || "Daily";
-            const isAdjusting = adjustingDrug === drug;
-            const isHistoryExpanded = expandedHistoryDrug === drug;
-
+            const drugEntries = entries[drug] ?? [];
             return (
               <div
                 key={drug}
-                className="p-4 bg-slate-50 rounded-lg border border-slate-100 space-y-3"
+                className="p-4 bg-slate-50 rounded-lg space-y-4"
               >
                 <div className="flex items-center justify-between">
                   <div>
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className="font-semibold text-sm text-slate-800">{drug}</span>
-                      <span className="text-[11px] font-mono px-2 py-0.5 bg-white border border-slate-200 text-slate-700 rounded-md font-medium">
-                        {activeDosage} • {activeFrequency}
-                      </span>
-                      <button
-                        onClick={() => toggleOptOut(drug)}
-                        title={isOptedOut ? "Click to enable price alerts" : "Click to opt out of price alerts"}
-                        className={`text-[10px] px-2 py-0.5 rounded-full border transition-all cursor-pointer ${
-                          isOptedOut
-                            ? "bg-slate-100 text-slate-500 border-slate-200"
-                            : "bg-emerald-50 text-emerald-700 border-emerald-200"
-                        }`}
-                      >
-                        {isOptedOut ? "🔕 Price Watch Off" : "🔔 Price Watch Active"}
-                      </button>
-                    </div>
-                    <div className={r ? "text-xs text-slate-500 mt-1" : "text-xs text-slate-400 italic mt-1"}>
+                    <div className="font-medium text-sm">{drug}</div>
+                    <div className="text-xs text-slate-500">
                       {r
-                        ? `${t.best}: ${r.cheapest.pharmacyName} at $${r.cheapest.price}`
-                        : t.notYetCompared}
+                        ? `Best: ${r.cheapest.pharmacyName} at $${r.cheapest.price}`
+                        : "Not yet compared"}
                     </div>
                   </div>
-                  <div className="flex items-center gap-2">
-                    {r && (
-                      <div className="text-right mr-2 hidden sm:block">
-                        <div className="text-sm font-semibold text-green-600">
-                          {t.save} ${r.potentialSavings}/mo
-                        </div>
-                        <div className="text-xs text-slate-400">
-                          {r.savingsPercent}% {t.savings}
-                        </div>
+                  {r && (
+                    <div className="text-right">
+                      <div className="text-sm font-medium text-green-600">
+                        Save ${r.potentialSavings}/mo
                       </div>
-                    )}
-                    <button
-                      onClick={() => {
-                        if (isAdjusting) {
-                          setAdjustingDrug(null);
-                        } else {
-                          setAdjustingDrug(drug);
-                          setNewDosageInput(activeEntry?.newDosage || "");
-                          setNewFrequencyInput(activeEntry?.newFrequency || "");
-                          setDosageReasonInput("");
-                          setPrescriberInput("");
-                        }
-                      }}
-                      className="px-2.5 py-1 text-xs font-medium text-sky-700 bg-sky-50 hover:bg-sky-100 rounded-lg cursor-pointer transition-colors"
-                    >
-                      {isAdjusting ? "Cancel" : "Adjust Dose"}
-                    </button>
-                    <button
-                      onClick={() =>
-                        setExpandedHistoryDrug(isHistoryExpanded ? null : drug)
+                      <div className="text-xs text-slate-400">
+                        {r.savingsPercent}% savings
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <div className="space-y-2 rounded-lg border border-slate-200 bg-white p-3">
+                  <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                    Side effect journal
+                  </div>
+                  <div className="grid grid-cols-[1fr_120px_auto] gap-2">
+                    <input
+                      aria-label={`Side effect description for ${drug}`}
+                      value={forms[drug]?.description ?? ""}
+                      onChange={(e) =>
+                        setForms((prev) => ({
+                          ...prev,
+                          [drug]: {
+                            ...(prev[drug] ?? DEFAULT_SIDE_EFFECT_FORM),
+                            description: e.target.value,
+                          },
+                        }))
                       }
-                      className="px-2.5 py-1 text-xs text-slate-600 bg-white border border-slate-200 hover:bg-slate-100 rounded-lg cursor-pointer transition-colors"
+                      placeholder="Describe observed side effects"
+                      className="px-2 py-1.5 border border-slate-300 rounded-md text-xs focus:outline-none focus:ring-2 focus:ring-sky-500"
+                    />
+                    <select
+                      aria-label={`Severity for ${drug}`}
+                      value={forms[drug]?.severity ?? "mild"}
+                      onChange={(e) =>
+                        setForms((prev) => ({
+                          ...prev,
+                          [drug]: {
+                            ...(prev[drug] ?? DEFAULT_SIDE_EFFECT_FORM),
+                            severity: e.target.value as "mild" | "moderate" | "severe",
+                          },
+                        }))
+                      }
+                      className="px-2 py-1.5 border border-slate-300 rounded-md text-xs focus:outline-none focus:ring-2 focus:ring-sky-500"
                     >
-                      History ({drugHistory.length})
+                      <option value="mild">Mild</option>
+                      <option value="moderate">Moderate</option>
+                      <option value="severe">Severe</option>
+                    </select>
+                    <button
+                      type="button"
+                      onClick={() => addEntry(drug)}
+                      className="px-2.5 py-1.5 rounded-md bg-sky-500 text-white text-xs font-medium hover:bg-sky-600"
+                    >
+                      Save
                     </button>
                 <div>
                   <div className="font-medium text-sm flex items-center gap-2">
@@ -432,143 +479,25 @@ export function MedicationsTab({
                       </span>
                     )}
                   </div>
-                  <div className="text-xs text-slate-500">
-                    {r
-                      ? `${t.best}: ${r.cheapest.pharmacyName} at $${r.cheapest.price}`
-                      : t.notYetCompared}
-                  </div>
-                </div>
 
-                {/* Adjust Dose Form (Issue #1227) */}
-                {isAdjusting && (
-                  <div className="p-3 bg-white rounded-lg border border-sky-200 space-y-2 mt-2">
-                    <div className="text-xs font-semibold text-sky-900 flex items-center justify-between">
-                      <span>Record Provider Dosage Adjustment for {drug}</span>
-                      <span className="text-[10px] text-slate-400">Versioned • Immutable</span>
-                    </div>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
-                      <div>
-                        <label className="block text-slate-600 text-[11px] mb-0.5">
-                          New Dosage *
-                        </label>
-                        <input
-                          type="text"
-                          placeholder="e.g. 20mg"
-                          value={newDosageInput}
-                          onChange={(e) => setNewDosageInput(e.target.value)}
-                          className="w-full px-2.5 py-1.5 border border-slate-300 rounded focus:outline-none focus:ring-1 focus:ring-sky-500"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-slate-600 text-[11px] mb-0.5">
-                          New Frequency *
-                        </label>
-                        <input
-                          type="text"
-                          placeholder="e.g. Once daily in morning"
-                          value={newFrequencyInput}
-                          onChange={(e) => setNewFrequencyInput(e.target.value)}
-                          className="w-full px-2.5 py-1.5 border border-slate-300 rounded focus:outline-none focus:ring-1 focus:ring-sky-500"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-slate-600 text-[11px] mb-0.5">
-                          Reason for adjustment (optional)
-                        </label>
-                        <input
-                          type="text"
-                          placeholder="e.g. Doctor increased due to elevated BP reading"
-                          value={dosageReasonInput}
-                          onChange={(e) => setDosageReasonInput(e.target.value)}
-                          className="w-full px-2.5 py-1.5 border border-slate-300 rounded focus:outline-none focus:ring-1 focus:ring-sky-500"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-slate-600 text-[11px] mb-0.5">
-                          Prescribing Physician (optional)
-                        </label>
-                        <input
-                          type="text"
-                          placeholder="e.g. Dr. Sarah Chen, MD"
-                          value={prescriberInput}
-                          onChange={(e) => setPrescriberInput(e.target.value)}
-                          className="w-full px-2.5 py-1.5 border border-slate-300 rounded focus:outline-none focus:ring-1 focus:ring-sky-500"
-                        />
-                      </div>
-                    </div>
-                    <div className="flex justify-end gap-2 pt-1">
-                      <button
-                        type="button"
-                        onClick={() => setAdjustingDrug(null)}
-                        className="px-3 py-1 text-xs text-slate-600 hover:bg-slate-100 rounded cursor-pointer"
-                      >
-                        Cancel
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleSaveDosageChange(drug)}
-                        disabled={savingDosage}
-                        className="px-3 py-1 text-xs font-medium text-white bg-sky-600 hover:bg-sky-700 disabled:opacity-50 rounded cursor-pointer transition-colors"
-                      >
-                        {savingDosage ? "Saving..." : "Save Dosage Version"}
-                      </button>
-                    </div>
-                  </div>
-                )}
-
-                {/* Expandable History Timeline (Issue #1227) */}
-                {isHistoryExpanded && (
-                  <div className="p-3 bg-white rounded-lg border border-slate-200 mt-2 space-y-2">
-                    <div className="flex items-center justify-between border-b border-slate-100 pb-1.5">
-                      <span className="text-xs font-semibold text-slate-700">
-                        Dosage & Frequency History for {drug}
-                      </span>
-                      <span className="text-[10px] text-slate-400">
-                        Historical adherence calculates from active dosage at dose timestamp
-                      </span>
-                    </div>
-                    {drugHistory.length === 0 ? (
-                      <div className="text-xs text-slate-500 italic py-2 text-center">
-                        No dosage adjustments recorded. Rosa is taking her initial prescription baseline.
-                      </div>
-                    ) : (
-                      <div className="space-y-2 pt-1">
-                        {drugHistory.map((h, idx) => (
-                          <div
-                            key={h.id || `${h.medicationName}-${h.changedAt}-${idx}`}
-                            className="p-2.5 bg-slate-50 rounded border border-slate-100 text-xs space-y-1"
-                          >
-                            <div className="flex items-center justify-between flex-wrap gap-1">
-                              <span className="font-semibold text-slate-800">
-                                {h.previousDosage ? `${h.previousDosage} (${h.previousFrequency || "daily"})` : "Initial Prescription"} →{" "}
-                                <span className="text-sky-700 font-bold">{h.newDosage} ({h.newFrequency})</span>
-                              </span>
-                              <span className="text-[10px] text-slate-500">
-                                {new Date(h.changedAt).toLocaleDateString(undefined, {
-                                  year: "numeric",
-                                  month: "short",
-                                  day: "numeric",
-                                  hour: "2-digit",
-                                  minute: "2-digit",
-                                })}
-                              </span>
-                            </div>
-                            {h.reason && (
-                              <p className="text-slate-600 text-[11px]">
-                                <strong className="text-slate-700">Reason:</strong> {h.reason}
-                              </p>
-                            )}
-                            {h.prescriber && (
-                              <p className="text-slate-500 text-[10px]">
-                                Prescribed by: {h.prescriber}
-                              </p>
-                            )}
+                  {drugEntries.length > 0 ? (
+                    <ul className="space-y-2">
+                      {drugEntries.map((entry) => (
+                        <li key={entry.id} className="rounded-md border border-slate-200 bg-slate-50 p-2">
+                          <div className="flex items-center justify-between gap-2 text-[11px] text-slate-500">
+                            <span>{new Date(entry.timestamp).toLocaleDateString()}</span>
+                            <span className={`px-1.5 py-0.5 rounded-full ${entry.severity === "severe" ? "bg-red-100 text-red-700" : entry.severity === "moderate" ? "bg-amber-100 text-amber-700" : "bg-emerald-100 text-emerald-700"}`}>
+                              {entry.severity}
+                            </span>
                           </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                )}
+                          <p className="mt-1 text-xs text-slate-700">{entry.description}</p>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p className="text-[11px] text-slate-500">No side effects logged yet.</p>
+                  )}
+                </div>
               </div>
             );
           })}

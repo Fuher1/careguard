@@ -226,11 +226,8 @@ export function downloadBillAuditPDF(
 }
 
 export function downloadMedicationPDF(
-  params: {
-    priceResults: PharmacyCompareResult[];
-    interactionResult?: DrugInteractionResult;
-  },
-  options?: { theme?: PdfTheme; recipient?: RecipientProfile },
+  params: { priceResults: PharmacyCompareResult[]; interactionResult?: DrugInteractionResult; sideEffectEntries?: Array<{ medicationId: string; description: string; severity: string; timestamp: string }> },
+  options?: { theme?: PdfTheme; recipient?: RecipientProfile }
 ) {
   const theme = options?.theme ?? DEFAULT_PDF_THEME;
   const recipient = options?.recipient ?? {
@@ -350,64 +347,25 @@ export function downloadMedicationPDF(
     y = doc.lastAutoTable?.finalY ? doc.lastAutoTable.finalY + 8 : y + 30;
   }
 
-  // Logged vitals (#1237) — only when the caregiver has recorded any, so the
-  // doctor sees readings next to the medication regimen.
-  const vitals = [...(options?.vitals ?? [])].sort(
-    (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime(),
-  );
-  if (vitals.length > 0) {
+  if ((params.sideEffectEntries?.length ?? 0) > 0) {
     if (y > 240) { doc.addPage(); y = 20; }
     doc.setFontSize(11);
     doc.setTextColor(15, 23, 42);
-    doc.text("Vitals", 14, y);
-    y += 4;
-
-    const typeNames: Record<Vital["type"], string> = {
-      weight: "Weight",
-      blood_pressure: "Blood Pressure",
-      glucose: "Glucose",
-    };
-    autoTable(doc, {
-      startY: y,
-      head: [["Date", "Vital", "Reading"]],
-      body: vitals.map((v) => [new Date(v.timestamp).toLocaleString(), typeNames[v.type], formatVital(v)]),
-      headStyles: { fillColor: theme.headerColor, fontSize: 7 },
-      bodyStyles: { fontSize: 7 },
-      alternateRowStyles: { fillColor: [248, 250, 252] },
-      margin: { left: 14, right: 14 },
-    });
-  }
-
-  // Documented Allergies & Adverse Reactions (Issue #1230)
-  if ((params.allergies?.length ?? 0) > 0 && params.allergies) {
-    y = doc.lastAutoTable?.finalY ? doc.lastAutoTable.finalY + 8 : y + 10;
-    if (y > 240) { doc.addPage(); y = 20; }
-    doc.setFontSize(11);
-    doc.setTextColor(15, 23, 42);
-    doc.text("Documented Allergies & Adverse Reactions", 14, y);
+    doc.text("Side Effect Journal", 14, y);
     y += 4;
 
     autoTable(doc, {
       startY: y,
-      head: [["Substance", "Severity", "Reaction", "Notes"]],
-      body: params.allergies.map((a) => [
-        a.substance,
-        a.severity.toUpperCase().replace("_", "-"),
-        a.reaction || "Unspecified",
-        a.notes || "-",
+      head: [["Medication", "Severity", "Observed", "Date"]],
+      body: params.sideEffectEntries!.map((entry) => [
+        entry.medicationId,
+        entry.severity,
+        entry.description.slice(0, 60),
+        new Date(entry.timestamp).toLocaleDateString(),
       ]),
-      headStyles: { fillColor: [239, 68, 68], fontSize: 7 },
+      headStyles: { fillColor: [14, 116, 144], fontSize: 7 },
       bodyStyles: { fontSize: 7 },
-      margin: { left: 14, right: 14 },
-      didParseCell: (data) => {
-        if (data.section === "body" && data.column.index === 1) {
-          const val = String(data.cell.raw || "");
-          if (val === "LIFE-THREATENING" || val === "SEVERE") {
-            data.cell.styles.textColor = [220, 38, 38];
-            data.cell.styles.fontStyle = "bold";
-          }
-        }
-      },
+      columnStyles: { 2: { cellWidth: 70 } },
     });
   }
 

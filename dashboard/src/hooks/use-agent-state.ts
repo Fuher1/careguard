@@ -31,6 +31,7 @@ const DEFAULT_POLICY = {
   billMonthlyBudget: 500,
   approvalThreshold: 75,
   holdTimeSeconds: 86400,
+  severityThreshold: 'any',
 };
 
 export type PolicyForm = typeof DEFAULT_POLICY;

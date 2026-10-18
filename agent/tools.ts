@@ -634,6 +634,7 @@ const DEFAULT_POLICY: SpendingPolicy = {
   billMonthlyBudget: 500,
   approvalThreshold: 75,
   holdTimeSeconds: 0,
+  severityThreshold: 'any',
   toolFees: {
     comparePharmacyPrices: 0.002,
     auditBill: 0.01,
@@ -748,60 +749,37 @@ const SpendingTrackerSchema = z.object({
 });
 
 type PaymentCategory =
-  typeof TRANSACTION_CATEGORY.MEDICATIONS | typeof TRANSACTION_CATEGORY.BILLS;
+  | typeof TRANSACTION_CATEGORY.MEDICATIONS
+  | typeof TRANSACTION_CATEGORY.BILLS;
 
 // Zod schema for spending policy — enforces positive values, sane upper bounds,
 // and cross-field ordering. holdTimeSeconds uses .min(0) because DEFAULT_POLICY sets it to 0.
-export const SpendingPolicySchema = z
-  .object({
-    dailyLimit: z
-      .number()
-      .gt(0, "dailyLimit must be greater than 0")
-      .max(10_000, "dailyLimit cannot exceed $10,000"),
-    monthlyLimit: z
-      .number()
-      .gt(0, "monthlyLimit must be greater than 0")
-      .max(100_000, "monthlyLimit cannot exceed $100,000"),
-    medicationMonthlyBudget: z
-      .number()
-      .gt(0, "medicationMonthlyBudget must be greater than 0")
-      .max(50_000, "medicationMonthlyBudget cannot exceed $50,000"),
-    billMonthlyBudget: z
-      .number()
-      .gt(0, "billMonthlyBudget must be greater than 0")
-      .max(50_000, "billMonthlyBudget cannot exceed $50,000"),
-    approvalThreshold: z
-      .number()
-      .gt(0, "approvalThreshold must be greater than 0")
-      .max(10_000, "approvalThreshold cannot exceed $10,000"),
-    holdTimeSeconds: z.number().min(0).max(86_400).default(0),
-    timezone: z.string().optional(),
-    toolFees: z.record(z.number().min(0)).optional(),
-    notifications: z
-      .object({
-        email: z.boolean(),
-        sms: z.boolean(),
-        emailAddress: z.string().email().optional(),
-        phoneNumber: z.string().optional(),
-      })
-      .optional(),
-  })
-  .refine((p) => p.dailyLimit <= p.monthlyLimit, {
-    message: "dailyLimit cannot exceed monthlyLimit",
-    path: ["dailyLimit"],
-  })
-  .refine((p) => p.approvalThreshold <= p.dailyLimit, {
-    message: "approvalThreshold cannot exceed dailyLimit",
-    path: ["approvalThreshold"],
-  })
-  .refine(
-    (p) => p.medicationMonthlyBudget + p.billMonthlyBudget <= p.monthlyLimit,
-    {
-      message:
-        "medicationMonthlyBudget + billMonthlyBudget cannot exceed monthlyLimit",
-      path: ["medicationMonthlyBudget"],
-    },
-  );
+export const SpendingPolicySchema = z.object({
+  dailyLimit: z.number().gt(0, 'dailyLimit must be greater than 0').max(10_000, 'dailyLimit cannot exceed $10,000'),
+  monthlyLimit: z.number().gt(0, 'monthlyLimit must be greater than 0').max(100_000, 'monthlyLimit cannot exceed $100,000'),
+  medicationMonthlyBudget: z.number().gt(0, 'medicationMonthlyBudget must be greater than 0').max(50_000, 'medicationMonthlyBudget cannot exceed $50,000'),
+  billMonthlyBudget: z.number().gt(0, 'billMonthlyBudget must be greater than 0').max(50_000, 'billMonthlyBudget cannot exceed $50,000'),
+  approvalThreshold: z.number().gt(0, 'approvalThreshold must be greater than 0').max(10_000, 'approvalThreshold cannot exceed $10,000'),
+  holdTimeSeconds: z.number().min(0).max(86_400).default(0),
+  severityThreshold: z.enum(['any', 'major', 'moderate', 'mild']).default('any'),
+  timezone: z.string().optional(),
+  toolFees: z.record(z.number().min(0)).optional(),
+  notifications: z.object({
+    email: z.boolean(),
+    sms: z.boolean(),
+    emailAddress: z.string().email().optional(),
+    phoneNumber: z.string().optional(),
+  }).optional(),
+}).refine(
+  (p) => p.dailyLimit <= p.monthlyLimit,
+  { message: 'dailyLimit cannot exceed monthlyLimit', path: ['dailyLimit'] },
+).refine(
+  (p) => p.approvalThreshold <= p.dailyLimit,
+  { message: 'approvalThreshold cannot exceed dailyLimit', path: ['approvalThreshold'] },
+).refine(
+  (p) => p.medicationMonthlyBudget + p.billMonthlyBudget <= p.monthlyLimit,
+  { message: 'medicationMonthlyBudget + billMonthlyBudget cannot exceed monthlyLimit', path: ['medicationMonthlyBudget'] },
+);
 
 type SpendingPolicyInput = z.infer<typeof SpendingPolicySchema>;
 
@@ -1352,7 +1330,15 @@ function loadPolicy(recipientId?: string): SpendingPolicy {
   const file = getPolicyFile(recipientId);
   if (!existsSync(file)) return { ...DEFAULT_POLICY };
   try {
-    return JSON.parse(readFileSync(file, "utf-8"));
+    const parsed = JSON.parse(readFileSync(file, 'utf-8')) as SpendingPolicy;
+    return {
+      ...DEFAULT_POLICY,
+      ...parsed,
+      notifications: {
+        ...DEFAULT_POLICY.notifications,
+        ...(parsed.notifications || {}),
+      },
+    };
   } catch (err: any) {
     logger.warn(
       { file, error: err.message },
@@ -1360,6 +1346,52 @@ function loadPolicy(recipientId?: string): SpendingPolicy {
     );
     return { ...DEFAULT_POLICY };
   }
+}
+
+const GENERIC_EQUIVALENTS: Record<string, string[]> = {
+  'lipitor': ['atorvastatin'],
+  'atorvastatin': ['atorvastatin'],
+  'advil': ['ibuprofen'],
+  'motrin': ['ibuprofen'],
+  'ibuprofen': ['ibuprofen'],
+  'tylenol': ['acetaminophen'],
+  'acetaminophen': ['acetaminophen'],
+  'zocor': ['simvastatin'],
+  'simvastatin': ['simvastatin'],
+  'lasix': ['furosemide'],
+  'furosemide': ['furosemide'],
+};
+
+function resolveInteractionSeverity(value?: string): 'severe' | 'moderate' | 'mild' {
+  const normalized = String(value ?? '').toLowerCase();
+  if (['major', 'severe', 'critical'].includes(normalized)) return 'severe';
+  if (['moderate', 'warning'].includes(normalized)) return 'moderate';
+  return 'mild';
+}
+
+function resolveSeverityThreshold(recipientId?: string): 'any' | 'major' | 'moderate' | 'mild' {
+  const threshold = (loadPolicy(recipientId).severityThreshold ?? 'any').toLowerCase();
+  if (threshold === 'major' || threshold === 'moderate' || threshold === 'mild' || threshold === 'any') {
+    return threshold;
+  }
+  return 'any';
+}
+
+function shouldBlockInteraction(severity: string, threshold: 'any' | 'major' | 'moderate' | 'mild') {
+  const normalized = resolveInteractionSeverity(severity);
+  const rank = { mild: 1, moderate: 2, severe: 3 } as const;
+  const thresholdRank = { any: 4, major: 3, moderate: 2, mild: 1 } as const;
+  return rank[normalized] >= thresholdRank[threshold];
+}
+
+function buildGenericAlternatives(drugName: string) {
+  const normalized = drugName.toLowerCase();
+  return (GENERIC_EQUIVALENTS[normalized] ?? []).map((name) => ({
+    name,
+    label: `Generic equivalent of ${drugName}`,
+    informationalOnly: true,
+    safetyCheckRecommended: true,
+  }));
 }
 
 function savePolicy(policy: SpendingPolicy, recipientId?: string) {
@@ -1450,11 +1482,9 @@ export async function comparePharmacyPrices(
   dosage: string = "unspecified",
 ) {
   const url = `${PHARMACY_API}/pharmacy/compare?drug=${encodeURIComponent(drugName)}&dosage=${encodeURIComponent(dosage)}&zip=${encodeURIComponent(zipCode)}`;
-  const fee = getToolFee("comparePharmacyPrices");
-  logger.info(
-    { drug: drugName, fee },
-    "[x402] paying for pharmacy price query",
-  );
+  const fee = getToolFee('comparePharmacyPrices');
+  logger.info({ drug: drugName, fee }, '[x402] paying for pharmacy price query');
+  const genericAlternatives = buildGenericAlternatives(drugName);
 
   if (isMockNetwork()) {
     const receipt = createMockReceipt("x402:pharmacy-prices", {
@@ -1505,6 +1535,8 @@ export async function comparePharmacyPrices(
       },
       potentialSavings: 5.5,
       savingsPercent: 56.4,
+      genericAlternatives,
+      substitutionNote: genericAlternatives.length > 0 ? 'Informational only: a generic equivalent may be available. This is not a medical recommendation.' : undefined,
     };
     recordServiceFee(
       fee,
@@ -1529,11 +1561,10 @@ export async function comparePharmacyPrices(
     );
   }
 
-  let data;
-  try {
-    data = await response.json();
-  } catch (err) {
-    return { ok: false, reason: "MALFORMED_RESPONSE" };
+  const data = await response.json();
+  if (genericAlternatives.length > 0 && !data.genericAlternatives) {
+    data.genericAlternatives = genericAlternatives;
+    data.substitutionNote = 'Informational only: a generic equivalent may be available. This is not a medical recommendation.';
   }
 
   // Extract real Stellar tx hash from x402 payment response header
@@ -1754,7 +1785,11 @@ export async function auditBill(lineItemsInput: unknown) {
 }
 
 // --- Tool: Check drug interactions (pays via x402) ---
-export async function checkDrugInteractions(medications: string[]) {
+export async function checkDrugInteractions(
+  medications: string[],
+  severityThresholdOverride: 'any' | 'major' | 'moderate' | 'mild' | string = 'any',
+  recipientId?: string,
+) {
   if (medications.length < 2) {
     return {
       ok: false,
@@ -1765,93 +1800,105 @@ export async function checkDrugInteractions(medications: string[]) {
     };
   }
 
-  const medsParam = medications.join(",");
-  const fee = getToolFee("checkDrugInteractions");
+  const threshold = (
+    ['any', 'major', 'moderate', 'mild'].includes(String(severityThresholdOverride).toLowerCase())
+      ? String(severityThresholdOverride).toLowerCase()
+      : resolveSeverityThreshold(recipientId)
+  ) as 'any' | 'major' | 'moderate' | 'mild';
+
+  const medsParam = medications.join(',');
+  const fee = getToolFee('checkDrugInteractions');
   logger.info(
-    { medicationCount: medications.length, fee },
-    "[x402] paying for drug interaction check",
+    { medicationCount: medications.length, fee, threshold },
+    '[x402] paying for drug interaction check',
   );
 
-  if (isMockNetwork()) {
-    const receipt = createMockReceipt("x402:drug-interactions", {
-      medications,
-    });
-    const data = {
-      medications,
-      protocol: {
-        name: "x402",
-        mockNetwork: true,
-        price: `$${fee.toFixed(3)}`,
-        payTo: "mock-drug-interaction-api",
-        receipt,
-      },
-      interactions: [],
-      summary:
-        "Mock network interaction check completed. No interactions detected.",
-    };
-    recordServiceFee(
-      fee,
-      `x402 query: drug interactions for ${medications.join(", ")}`,
-      "mock-drug-interaction-api",
-      receipt.stellarTxHash,
-    );
-    return data;
-  }
+  const syntheticInteractions = [
+    { drug1: 'warfarin', drug2: 'ibuprofen', severity: 'moderate', recommendation: 'Monitor for bleeding risk and consider an alternative pain reliever.' },
+    { drug1: 'lisinopril', drug2: 'spironolactone', severity: 'moderate', recommendation: 'Monitor potassium and blood pressure closely.' },
+  ].filter((interaction) => medications.some((med) => med.toLowerCase().includes(interaction.drug1)) && medications.some((med) => med.toLowerCase().includes(interaction.drug2)));
 
-  let response: Response;
-  try {
-    response = await getX402Fetch()(
-      `${DRUG_INTERACTION_API}/drug/interactions?meds=${encodeURIComponent(
-        medications.join(","),
-      )}`,
-    );
-  } catch (err) {
-    throw upstreamConnectionError(DRUG_INTERACTION_UPSTREAM, err);
-  }
+  const data = isMockNetwork()
+    ? {
+        medications,
+        protocol: {
+          name: 'x402',
+          mockNetwork: true,
+          price: `$${fee.toFixed(3)}`,
+          payTo: 'mock-drug-interaction-api',
+          receipt: createMockReceipt('x402:drug-interactions', { medications }).stellarTxHash,
+        },
+        interactions: syntheticInteractions,
+        summary: syntheticInteractions.length > 0
+          ? `Detected ${syntheticInteractions.length} interaction(s) while checking ${medications.join(', ')}.`
+          : 'Mock network interaction check completed. No interactions detected.',
+      }
+    : await (async () => {
+        const response = await getX402Fetch()(
+          `${DRUG_INTERACTION_API}/drug/interactions?meds=${encodeURIComponent(
+            medications.join(','),
+          )}`,
+        );
 
-  if (!response.ok) {
-    const error = await response.text();
-    throw new Error(
-      `Drug Interaction API error (${response.status}): ${truncateError(error)}`,
-    );
-  }
+        if (!response.ok) {
+          const error = await response.text();
+          throw new Error(
+            `Drug Interaction API error (${response.status}): ${truncateError(error)}`,
+          );
+        }
 
-  let data;
-  try {
-    data = await response.json();
-  } catch (err) {
-    return { ok: false, reason: "MALFORMED_RESPONSE" };
-  }
+        const payload = await response.json();
+        const txHashResult = extractX402TxHash(response);
+        const txHash = txHashResult === TX_HASH_EXTRACTION_FAILED ? undefined : txHashResult;
+        const txHashStatus = txHashResult === TX_HASH_EXTRACTION_FAILED
+          ? 'extraction_failed' as const
+          : txHash ? 'extracted' as const : undefined;
 
-  const txHashResult = extractX402TxHash(response);
-  const txHash =
-    txHashResult === TX_HASH_EXTRACTION_FAILED ? undefined : txHashResult;
-  const txHashStatus =
-    txHashResult === TX_HASH_EXTRACTION_FAILED
-      ? ("extraction_failed" as const)
-      : txHash
-        ? ("extracted" as const)
-        : undefined;
+        if (txHash) {
+          const settled = await waitForStellarSettlement(txHash);
+          if (!settled) {
+            throw new Error(
+              `x402 settlement not confirmed on-chain for tx ${txHash}`,
+            );
+          }
+        }
 
-  // Wait for on-chain settlement before recording the fee
-  if (txHash) {
-    const settled = await waitForStellarSettlement(txHash);
-    if (!settled) {
-      throw new Error(
-        `x402 settlement not confirmed on-chain for tx ${txHash}`,
-      );
-    }
-  }
+        recordServiceFee(
+          fee,
+          `x402 query: drug interactions for ${medications.join(', ')}`,
+          payload.protocol?.payTo || 'drug-interaction-api',
+          txHash,
+          txHashStatus,
+        );
+        return payload;
+      })();
 
-  recordServiceFee(
-    fee,
-    `x402 query: drug interactions for ${medications.join(", ")}`,
-    data.protocol?.payTo || "drug-interaction-api",
-    txHash,
-    txHashStatus,
-  );
+  const interactions = Array.isArray(data.interactions) ? data.interactions : [];
+  const effectiveInteractions = interactions.map((interaction: any) => ({
+    ...interaction,
+    severity: resolveInteractionSeverity(interaction.severity),
+  }));
 
-  return data;
+  const highest = effectiveInteractions.reduce((max: string | null, current: any) => {
+    if (!max) return current.severity;
+    return { severe: 3, moderate: 2, mild: 1 }[current.severity] > { severe: 3, moderate: 2, mild: 1 }[max] ? current.severity : max;
+  }, null as string | null);
+
+  const decision = effectiveInteractions.length === 0 ? 'none' : shouldBlockInteraction(highest || 'mild', threshold) ? 'block' : 'warn';
+  const summaryText = effectiveInteractions.length === 0
+    ? 'Mock network interaction check completed. No interactions detected.'
+    : decision === 'block'
+      ? `Detected ${effectiveInteractions.length} interaction(s) at or above the configured ${threshold} threshold.`
+      : `Detected ${effectiveInteractions.length} interaction(s), but they remain below the configured ${threshold} threshold.`;
+
+  return {
+    ...data,
+    interactions: effectiveInteractions,
+    summary: summaryText,
+    decision,
+    blockingThreshold: threshold,
+    ok: true,
+  };
 }
 
 // --- Tool: Check spending policy ---
