@@ -170,6 +170,20 @@ export const AdherenceTimelineEventSchema = z.object({
 
 export type AdherenceTimelineEvent = z.infer<typeof AdherenceTimelineEventSchema>;
 
+/** A persisted drug interaction check (#1193). */
+export const InteractionCheckSchema = z.object({
+  id: z.string(),
+  recipient_id: z.string(),
+  medications: z.array(z.string()),
+  interaction_count: z.number(),
+  highest_severity: z.string().nullable(),
+  summary: z.string().nullable(),
+  interactions: z.array(z.unknown()),
+  checked_at: z.string(),
+});
+
+export type InteractionCheck = z.infer<typeof InteractionCheckSchema>;
+
 /** Human-readable reading, e.g. "128/82 mmHg" or "162 lb". */
 export function formatVital(v: Pick<Vital, "type" | "value" | "secondary_value" | "unit">): string {
   const reading =
@@ -214,3 +228,32 @@ export const ItemPresenceEntrySchema = z.object({
 export type ItemPresenceEntry = z.infer<typeof ItemPresenceEntrySchema>;
 
 export type ItemPresenceMap = Record<string, ItemPresenceEntry[]>;
+
+// ── Linked caregivers & handoff notes (#1179, #1180) ──────────────────────────
+// Mirrors services/care-recipients/db.ts.
+
+export const CAREGIVER_ROLES = ["owner", "co-caregiver", "viewer"] as const;
+export type CaregiverRole = (typeof CAREGIVER_ROLES)[number];
+
+export const LinkedCaregiverSchema = z.object({
+  caregiver_user_id: z.string().min(1),
+  email: z.string().nullable(),
+  display_name: z.string().nullable(),
+  role: z.enum(CAREGIVER_ROLES),
+  status: z.enum(["active", "invited"]),
+  created_at: z.string(),
+});
+
+export type LinkedCaregiver = z.infer<typeof LinkedCaregiverSchema>;
+
+export const HANDOFF_NOTE_MAX_LENGTH = 500;
+
+export const HandoffNoteSchema = z.object({
+  id: z.string().min(1),
+  recipient_id: z.string().min(1),
+  author: z.string(),
+  text: z.string(),
+  created_at: z.string(),
+});
+
+export type HandoffNote = z.infer<typeof HandoffNoteSchema>;

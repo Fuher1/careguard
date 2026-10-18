@@ -237,9 +237,9 @@ export const AgentActionSchema = z.object({
 
 export type AgentAction = z.infer<typeof AgentActionSchema>;
 
-// ── CareRecipient ─────────────────────────────────────────────────────────────
+// ── CareRecipientProfile (Issue #1067) ────────────────────────────────────────
 
-export interface CareRecipient {
+export interface CareRecipientProfile {
   name: string;
   walletAddress: string;
   medications: Medication[];
@@ -252,6 +252,9 @@ export interface CareRecipient {
   };
   savingsAchieved: number;
 }
+
+/** Legacy type alias for CareRecipientProfile (Issue #1067) */
+export type CareRecipient = CareRecipientProfile;
 
 // ── Alert ─────────────────────────────────────────────────────────────────────
 

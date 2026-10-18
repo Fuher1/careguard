@@ -106,11 +106,14 @@ import {
   PRICING_DATABASE,
   getPharmacyPrices,
   getAvailableDrugs,
+  DEFAULT_ZIP_CODE,
 } from "./shared/pharmacy-pricing.ts";
-import { createCareRecipientsStore } from "./services/care-recipients/db.ts";
+import { getCareRecipientsStore } from "./services/care-recipients/db.ts";
 import { createCareRecipientsRouter } from "./services/care-recipients/routes.ts";
 import { createVitalsStore } from "./services/vitals/db.ts";
 import { createVitalsRouter } from "./services/vitals/routes.ts";
+import { getInteractionCheckStore } from "./services/interaction-checks/db.ts";
+import { createInteractionChecksRouter } from "./services/interaction-checks/routes.ts";
 import {
   buildCompareResponse,
   DrugRecordSchema,
@@ -438,7 +441,8 @@ app.patch("/agent/profile", (req, res) => {
 const PHARMACY_ADMIN_TOKEN =
   process.env.PHARMACY_ADMIN_TOKEN || CAREGIVER_TOKEN;
 const pharmacyStore = createPharmacyPricingStore();
-const recipientsStore = createCareRecipientsStore();
+// Shared with the agent's get_handoff_notes tool (#1180).
+const recipientsStore = getCareRecipientsStore();
 
 // Register default names and database names on server startup
 registerKnownNames([_profileData.recipient.name, _profileData.caregiver.name]);
@@ -618,6 +622,9 @@ app.get(
       drug: req.query.drug,
       dosage: req.query.dosage,
       zip: req.query.zip,
+      recipient: req.query.recipient,
+      recipient_id: req.query.recipient_id,
+      recipientId: req.query.recipientId,
     });
     if (!parsedQuery.success) {
       res.status(400).json({
@@ -630,13 +637,18 @@ app.get(
 
     const query = parsedQuery.data as PharmacyCompareQuery;
     const drug = query.drug.trim().toLowerCase();
-    const dosage = resolveRequestedDosage(drug, query.dosage);
+    const recipient =
+      query.recipient ||
+      query.recipient_id ||
+      query.recipientId ||
+      (req.headers["x-recipient-id"] as string | undefined);
+    const dosage = resolveRequestedDosage(drug, query.dosage, recipient);
 
     try {
-      const { prices, usedZipCode, isFallbackZip } = getPharmacyPrices(
-        drug,
-        query.zip,
-      );
+      const prices = pharmacyStore.getPrices(drug);
+      const isFallbackZip = Boolean(query.zip && query.zip !== DEFAULT_ZIP_CODE);
+      const usedZipCode = isFallbackZip ? DEFAULT_ZIP_CODE : (query.zip || DEFAULT_ZIP_CODE);
+
       res.json(
         buildCompareResponse({
           drug,
@@ -1067,6 +1079,8 @@ app.post("/agent/policy", (req, res) => {
 });
 // #1237: manual vitals logging, charted alongside medication adherence.
 app.use("/agent", createVitalsRouter(createVitalsStore()));
+// #1193: searchable history of past drug interaction checks.
+app.use("/agent", createInteractionChecksRouter(getInteractionCheckStore()));
 // #1238: preview a policy change against recent payment history.
 app.post("/agent/policy/preview", (req, res) => {
   const result = SpendingPolicySchema.safeParse(req.body);
