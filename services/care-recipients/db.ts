@@ -147,6 +147,10 @@ function defaultDbPath(): string {
   if (process.env.NODE_ENV === 'test') {
     return ':memory:';
   }
+  // Fall back to DATA_DIR so a single-volume-mount deployment works (#1043).
+  if (process.env.DATA_DIR) {
+    return path.join(process.env.DATA_DIR, 'careguard.sqlite');
+  }
   return new URL('../../data/careguard.sqlite', import.meta.url).pathname;
 }
 

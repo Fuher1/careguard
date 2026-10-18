@@ -413,7 +413,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
         tools: LLM_TOOLS,
         messages,
       });
-      agentLlmLatencyMs.set({ model }, performance.now() - startTime);
+      agentLlmLatencyMs.observe({ model }, performance.now() - startTime);
     } catch (llmErr: any) {
       logger.error({ err: llmErr.message, iteration }, "LLM API error");
       agentLlmErrorTotal.inc();
