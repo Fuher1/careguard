@@ -654,9 +654,6 @@ app.put("/agent/recipients/:recipientId", (req, res) => {
     recipientProfiles[recipientId].medications = medications;
   if (doctor) recipientProfiles[recipientId].doctor = doctor;
   if (insurance) recipientProfiles[recipientId].insurance = insurance;
-  const dir = new URL(`../data/recipients/${recipientId}`, import.meta.url)
-    .pathname;
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   res.json({ success: true, recipient: recipientProfiles[recipientId] });
 });
 
