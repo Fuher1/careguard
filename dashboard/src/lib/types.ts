@@ -8,6 +8,7 @@ export const BillLineItemSchema = z.object({
   status: z.enum(["valid", "duplicate", "upcoded", "unbundled", "error"]),
   suggestedAmount: z.number().optional(),
   errorDescription: z.string().optional(),
+  annotation: z.string().optional(),
 });
 
 export const BillAuditResultSchema = z.object({
@@ -125,6 +126,7 @@ export const SpendingDataSchema = z.object({
     billMonthlyBudget: z.number(),
     approvalThreshold: z.number(),
     holdTimeSeconds: z.number().optional().default(86400),
+    warningThresholdPct: z.number().optional(),
   }),
   spending: z.object({
     medications: z.number(),
