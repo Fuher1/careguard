@@ -2,6 +2,8 @@ import { randomUUID } from "crypto";
 
 const DEFAULT_RESULT_SIZE_LIMIT = 8 * 1024;
 const DEFAULT_SAMPLE_SIZE = 10;
+// Hard cap on caller-supplied limit for fetch_tool_result (#1036).
+export const FETCH_TOOL_RESULT_MAX_LIMIT = 100;
 // TTL for stored tool results: 10 minutes. Entries older than this are treated
 // as not found so the store does not grow unbounded under production traffic (#1035).
 const TOOL_RESULT_TTL_MS = 10 * 60 * 1000;
@@ -126,6 +128,7 @@ export function fetchToolResult(
   offset = 0,
   limit = DEFAULT_SAMPLE_SIZE,
 ): Record<string, unknown> {
+  limit = Math.min(limit, FETCH_TOOL_RESULT_MAX_LIMIT);
   const stored = toolResultStore.get(resultId);
   if (!stored || Date.now() - stored.createdAtMs > TOOL_RESULT_TTL_MS) {
     if (stored) toolResultStore.delete(resultId);
