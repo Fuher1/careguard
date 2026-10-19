@@ -11,14 +11,27 @@
  * docs/tech-stack.md → "Dependency version pairing".
  */
 
-import { appendFileSync, existsSync, mkdirSync, statSync, unlinkSync, renameSync, readFileSync, openSync, readSync, closeSync, writeFileSync } from "fs";
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  statSync,
+  unlinkSync,
+  renameSync,
+  readFileSync,
+  openSync,
+  readSync,
+  closeSync,
+  writeFileSync,
+} from "fs";
 import { Router, Request, Response } from "express";
 import { fileURLToPath } from "url";
 import lock from "proper-lockfile";
 import { createHash } from "crypto";
 
 export function getAuditFilePath(): string {
-  const dataDir = process.env.DATA_DIR || fileURLToPath(new URL("../data", import.meta.url));
+  const dataDir =
+    process.env.DATA_DIR || fileURLToPath(new URL("../data", import.meta.url));
   if (!existsSync(dataDir)) {
     mkdirSync(dataDir, { recursive: true });
   }
@@ -107,7 +120,7 @@ function rotateLogs() {
 
 export function appendAuditEntry(entry: AuditEntry): void {
   rotateLogs();
-  
+
   const payload = {
     timestamp: new Date().toISOString(),
     ...entry,
@@ -125,7 +138,8 @@ export function appendAuditEntry(entry: AuditEntry): void {
     release = lock.lockSync(auditFile, { stale: 5000 });
 
     const lastLine = getLastLine(auditFile);
-    let prevHash = "0000000000000000000000000000000000000000000000000000000000000000";
+    let prevHash =
+      "0000000000000000000000000000000000000000000000000000000000000000";
 
     if (lastLine) {
       try {
@@ -150,13 +164,17 @@ export function appendAuditEntry(entry: AuditEntry): void {
 
     appendFileSync(auditFile, line + "\n");
   } catch (err: any) {
-    process.stderr.write(`audit-log: failed to write entry: ${err?.message ?? err}\n`);
+    process.stderr.write(
+      `audit-log: failed to write entry: ${err?.message ?? err}\n`,
+    );
   } finally {
     if (release) {
       try {
         release();
       } catch (err: any) {
-        process.stderr.write(`audit-log: failed to release lock: ${err?.message ?? err}\n`);
+        process.stderr.write(
+          `audit-log: failed to release lock: ${err?.message ?? err}\n`,
+        );
       }
     }
   }
@@ -185,7 +203,7 @@ auditRouter.get("/", requireAdmin, (req: Request, res: Response) => {
 
     const fileContent = readFileSync(auditFile, "utf-8");
     const lines = fileContent.trim().split("\n");
-    
+
     let logs: any[] = [];
     for (const line of lines) {
       if (!line) continue;
@@ -196,11 +214,20 @@ auditRouter.get("/", requireAdmin, (req: Request, res: Response) => {
       }
     }
 
-    if (from) logs = logs.filter(l => new Date(l.timestamp) >= new Date(from as string));
-    if (to) logs = logs.filter(l => new Date(l.timestamp) <= new Date(to as string));
-    if (event) logs = logs.filter(l => l.event === event);
+    if (from)
+      logs = logs.filter(
+        (l) => new Date(l.timestamp) >= new Date(from as string),
+      );
+    if (to)
+      logs = logs.filter(
+        (l) => new Date(l.timestamp) <= new Date(to as string),
+      );
+    if (event) logs = logs.filter((l) => l.event === event);
 
-    logs.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+    logs.sort(
+      (a, b) =>
+        new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime(),
+    );
 
     const startIndex = (pageNum - 1) * limitNum;
     const paginatedLogs = logs.slice(startIndex, startIndex + limitNum);
@@ -215,3 +242,112 @@ auditRouter.get("/", requireAdmin, (req: Request, res: Response) => {
     res.status(500).json({ error: "Internal server error reading audit logs" });
   }
 });
+
+export function readAuditLog(): Array<{ event: string; actor: string; details?: any; timestamp: string }> {
+  const filePath = getAuditFilePath();
+  if (!existsSync(filePath)) return [];
+  const content = readFileSync(filePath, "utf-8");
+  return content
+    .trim()
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => {
+      try {
+        return JSON.parse(line);
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean);
+}
+// ── Caregiver-facing audit export (Feature: accountability report) ────────────
+
+/**
+ * Audit event names that are meaningful to caregivers.
+ * Internal-only technical events (tool_call, iteration_limit_reached, etc.) are excluded.
+ */
+export const CAREGIVER_AUDIT_EVENTS = new Set([
+  "policy.updated",
+  "spending.reset",
+  "agent.policy_updated",
+  "agent.reset",
+  "agent.paused",
+  "agent.resumed",
+  "agent.auto-paused",
+  "order.status_updated",
+]);
+
+/**
+ * GET /agent/audit/caregiver-export
+ *
+ * Returns a filtered, paginated list of caregiver-relevant audit entries.
+ * Supports date-range filtering via `from` / `to` ISO query params.
+ * Response format is identical to GET /agent/audit so the dashboard can
+ * reuse the same parsing logic.
+ */
+auditRouter.get(
+  "/caregiver-export",
+  requireAdmin,
+  (req: Request, res: Response) => {
+    try {
+      const { from, to, page = "1", limit = "50" } = req.query;
+      const pageNum = Math.max(1, parseInt(page as string, 10) || 1);
+      const limitNum = Math.min(
+        200,
+        Math.max(1, parseInt(limit as string, 10) || 50),
+      );
+      const auditFile = getAuditFilePath();
+
+      if (!existsSync(auditFile)) {
+        return res.json({ data: [], total: 0 });
+      }
+
+      const fileContent = readFileSync(auditFile, "utf-8");
+      const lines = fileContent.trim().split("\n");
+
+      let logs: any[] = [];
+      for (const line of lines) {
+        if (!line) continue;
+        try {
+          logs.push(JSON.parse(line));
+        } catch {
+          // Skip malformed lines
+        }
+      }
+
+      // Filter to caregiver-relevant events only
+      logs = logs.filter((l) => CAREGIVER_AUDIT_EVENTS.has(l.event));
+
+      // Date-range filter
+      if (from)
+        logs = logs.filter(
+          (l) => new Date(l.timestamp) >= new Date(from as string),
+        );
+      if (to)
+        logs = logs.filter(
+          (l) => new Date(l.timestamp) <= new Date(to as string),
+        );
+
+      // Sort newest-first
+      logs.sort(
+        (a, b) =>
+          new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime(),
+      );
+
+      const total = logs.length;
+      const startIndex = (pageNum - 1) * limitNum;
+      const paginatedLogs = logs.slice(startIndex, startIndex + limitNum);
+
+      res.json({
+        data: paginatedLogs,
+        total,
+        page: pageNum,
+        limit: limitNum,
+      });
+    } catch {
+      res
+        .status(500)
+        .json({ error: "Internal server error reading audit logs" });
+    }
+  },
+);

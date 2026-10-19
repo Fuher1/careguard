@@ -33,7 +33,6 @@ import { applySecurityMiddleware } from "./shared/security-middleware.ts";
 import { createApiDocsRouter } from "./shared/api-docs.ts";
 import { logger } from "./shared/logger.ts";
 import { requireApiKey } from "./shared/auth.ts";
-import { createPharmacyAdminAuth } from "./shared/pharmacy-admin-auth.ts";
 import {
   validateTask,
   getSuspiciousTaskCount,
@@ -44,11 +43,31 @@ import {
   auditBill,
   validateBillAuditRequest,
 } from "./shared/bill-audit.ts";
+import { getProviderBillHistoryStore } from "./services/bill-audit-api/history.ts";
 import { sanitizeUserString } from "./shared/sanitize.ts";
 import { registerKnownNames } from "./shared/redact.ts";
 
 // Sentry (gated by SENTRY_DSN)
 import { initSentry } from "./shared/sentry.ts";
+import {
+  loadRecipientAllergies,
+  addRecipientAllergy,
+  removeRecipientAllergy,
+} from "./shared/allergies.ts";
+import { loadPresenceMap, recordItemView } from "./shared/presence.ts";
+import { extractLineItemsFromBillImage } from "./shared/bill-ocr.ts";
+import { runPriceWatchForRecipient } from "./agent/price-watch.ts";
+import {
+  loadMultisigConfig,
+  saveMultisigConfig,
+  loadMultisigRequests,
+  signAndSubmitMultisigRequest,
+  rejectMultisigRequest,
+} from "./shared/multisig.ts";
+import {
+  recordDosageChange,
+  getMedicationHistory,
+} from "./shared/medication-history.ts";
 
 // Observability
 import { requestLifecycleMiddleware } from "./shared/request-lifecycle.ts";
@@ -71,6 +90,12 @@ import {
 } from "./shared/agent-state.ts";
 import { checkWalletBalance, formatResult, fetchWalletBalances } from "./shared/wallet-balance.ts";
 import { appendAuditEntry, auditRouter } from "./shared/audit-log.ts";
+import { pushTokenRouter } from "./shared/push-tokens.ts";
+import {
+  orderStatusRouter,
+  pharmacyWebhookRouter,
+} from "./shared/order-status.ts";
+import { startOrderStatusReminderCron } from "./shared/order-status-reminder.ts";
 import {
   rateLimiters,
   perRouteLimiters,
@@ -89,17 +114,29 @@ import {
   getSpendingTracker,
   resetSpendingTracker,
   SpendingPolicySchema,
+  previewSpendingPolicy,
+  getAdherenceStatus,
+  confirmAdherenceReminder,
 } from "./agent/tools.ts";
+import { getPendingAdherences } from "./shared/adherence.ts";
 import { executeTool, runAgent } from "./agent/runner.ts";
 import { resolveRequestedDosage } from "./services/pharmacy-api/dosage.ts";
 import { createPharmacyPricingStore } from "./services/pharmacy-api/db.ts";
+import { createPricingProvider } from "./shared/pricing-sources.ts";
 import {
   PRICING_DATABASE,
   getPharmacyPrices,
   getAvailableDrugs,
+  DEFAULT_ZIP_CODE,
 } from "./shared/pharmacy-pricing.ts";
-import { createCareRecipientsStore } from "./services/care-recipients/db.ts";
+import { getCareRecipientsStore } from "./services/care-recipients/db.ts";
 import { createCareRecipientsRouter } from "./services/care-recipients/routes.ts";
+import { createVitalsStore } from "./services/vitals/db.ts";
+import { createVitalsRouter } from "./services/vitals/routes.ts";
+import { getInteractionCheckStore } from "./services/interaction-checks/db.ts";
+import { createInteractionChecksRouter } from "./services/interaction-checks/routes.ts";
+import { getAgentHistoryStore } from "./services/agent-history/db.ts";
+import { createAgentHistoryRouter } from "./services/agent-history/routes.ts";
 import {
   buildCompareResponse,
   DrugRecordSchema,
@@ -258,6 +295,12 @@ let _profileData = {
   caregiver: { ..._DEFAULT_PROFILE.caregiver },
 };
 
+// Multi-recipient store (#1028) — seeded from the default profile so
+// recipient_id=rosa resolves on the unified server just like agent/server.ts.
+const _recipientProfiles: Record<string, typeof _DEFAULT_PROFILE.recipient> = {
+  rosa: { ..._DEFAULT_PROFILE.recipient, medications: [..._DEFAULT_PROFILE.recipient.medications] },
+};
+
 // --- Express App ---
 const app: Express = express();
 let isDraining = false;
@@ -285,6 +328,9 @@ app.use((req, res, next) =>
 app.use(requestLifecycleMiddleware());
 app.use("/agent", requireApiKey);
 app.use("/agent/audit", auditRouter);
+app.use("/agent/push-tokens", pushTokenRouter);
+app.use("/agent/transactions/:txId/order-status", orderStatusRouter);
+app.use("/agent/order-status-webhook", pharmacyWebhookRouter);
 
 // --- Prometheus metrics ---
 app.get("/metrics", metricsHandler());
@@ -419,6 +465,40 @@ app.patch("/agent/profile", (req, res) => {
   res.json(_profileData);
 });
 
+// --- Multi-recipient endpoints (#1028) ---
+app.get("/agent/recipients", (_req, res) => {
+  res.json({
+    recipients: Object.keys(_recipientProfiles),
+    profiles: _recipientProfiles,
+  });
+});
+
+app.put("/agent/recipients/:recipientId", (req, res) => {
+  const { recipientId } = req.params;
+  const { name, age, medications, doctor, insurance } = req.body ?? {};
+  if (!_recipientProfiles[recipientId]) {
+    _recipientProfiles[recipientId] = {
+      ..._DEFAULT_PROFILE.recipient,
+      name: recipientId,
+      medications: [],
+    };
+  }
+  if (name) {
+    _recipientProfiles[recipientId].name = name;
+    registerKnownNames([name]);
+  }
+  if (typeof age === "number") _recipientProfiles[recipientId].age = age;
+  if (Array.isArray(medications))
+    _recipientProfiles[recipientId].medications = medications;
+  if (doctor) (_recipientProfiles[recipientId] as Record<string, unknown>).doctor = doctor;
+  if (insurance) (_recipientProfiles[recipientId] as Record<string, unknown>).insurance = insurance;
+  // Keep rosa profile in sync with _profileData for the legacy single-profile route.
+  if (recipientId === "rosa") {
+    _profileData.recipient = { ..._recipientProfiles.rosa };
+  }
+  res.json({ success: true, recipient: _recipientProfiles[recipientId] });
+});
+
 // ============================================================
 // PHARMACY PRICE API (was port 3001)
 // ============================================================
@@ -426,7 +506,13 @@ app.patch("/agent/profile", (req, res) => {
 const PHARMACY_ADMIN_TOKEN =
   process.env.PHARMACY_ADMIN_TOKEN || CAREGIVER_TOKEN;
 const pharmacyStore = createPharmacyPricingStore();
-const recipientsStore = createCareRecipientsStore();
+// Activated when PHARMACY_PRICING_PROVIDER is set to a non-static value (#1031).
+const externalPricingProvider =
+  process.env.PHARMACY_PRICING_PROVIDER && process.env.PHARMACY_PRICING_PROVIDER !== "static"
+    ? createPricingProvider(process.env.PHARMACY_PRICING_PROVIDER)
+    : null;
+// Shared with the agent's get_handoff_notes tool (#1180).
+const recipientsStore = getCareRecipientsStore();
 
 // Register default names and database names on server startup
 registerKnownNames([_profileData.recipient.name, _profileData.caregiver.name]);
@@ -606,6 +692,9 @@ app.get(
       drug: req.query.drug,
       dosage: req.query.dosage,
       zip: req.query.zip,
+      recipient: req.query.recipient,
+      recipient_id: req.query.recipient_id,
+      recipientId: req.query.recipientId,
     });
     if (!parsedQuery.success) {
       res.status(400).json({
@@ -618,13 +707,22 @@ app.get(
 
     const query = parsedQuery.data as PharmacyCompareQuery;
     const drug = query.drug.trim().toLowerCase();
-    const dosage = resolveRequestedDosage(drug, query.dosage);
+    const recipient =
+      query.recipient ||
+      query.recipient_id ||
+      query.recipientId ||
+      (req.headers["x-recipient-id"] as string | undefined);
+    const dosage = resolveRequestedDosage(drug, query.dosage, recipient);
 
     try {
-      const { prices, usedZipCode, isFallbackZip } = getPharmacyPrices(
-        drug,
-        query.zip,
-      );
+      // Use the external pricing provider when configured (#1031); fall back to the
+      // SQLite-backed store which holds admin-managed pricing data.
+      const prices = externalPricingProvider
+        ? await externalPricingProvider.getPrices(drug, query.zip)
+        : pharmacyStore.getPrices(drug);
+      const isFallbackZip = Boolean(query.zip && query.zip !== DEFAULT_ZIP_CODE);
+      const usedZipCode = isFallbackZip ? DEFAULT_ZIP_CODE : (query.zip || DEFAULT_ZIP_CODE);
+
       res.json(
         buildCompareResponse({
           drug,
@@ -765,12 +863,40 @@ app.post(
         ...lineItem,
         description: sanitizeUserString(lineItem.description),
       }));
-      res.json(
-        auditBill(sanitizedLineItems, {
-          network: NETWORK,
-          payTo: process.env.BILL_PROVIDER_PUBLIC_KEY,
-        }),
-      );
+      const providerId =
+        validatedBody.providerId || (req.body?.provider_id as string | undefined);
+      const providerName =
+        validatedBody.providerName || (req.body?.provider_name as string | undefined);
+      const historyStore = getProviderBillHistoryStore();
+      let providerHistoryLookup;
+      if (providerId) {
+        providerHistoryLookup = (cptCode: string, chargedAmount: number) => {
+          return historyStore.compareAgainstHistory({
+            providerId,
+            providerName,
+            cptCode,
+            currentChargedAmount: chargedAmount,
+          });
+        };
+      }
+
+      const auditResult = auditBill(sanitizedLineItems, {
+        network: NETWORK,
+        payTo: process.env.BILL_PROVIDER_PUBLIC_KEY,
+        providerHistoryLookup,
+      });
+
+      if (providerId) {
+        historyStore.recordBillCharges({
+          providerId,
+          providerName: providerName || "Healthcare Provider",
+          recipientId:
+            validatedBody.recipientId || (req.body?.recipient_id as string | undefined),
+          lineItems: sanitizedLineItems,
+        });
+      }
+
+      res.json(auditResult);
     } catch (error) {
       if (error instanceof BillAuditValidationError) {
         const validationError = error as BillAuditValidationError;
@@ -1053,6 +1179,39 @@ app.post("/agent/policy", (req, res) => {
   });
   res.json({ success: true, policy: result.data });
 });
+// --- Adherence endpoints (#264) — mirrors agent/server.ts ---
+app.get("/agent/adherence", (req, res) => {
+  const recipientId = (req.query.recipient_id as string) || "rosa";
+  res.json(getAdherenceStatus(recipientId));
+});
+app.get("/agent/adherence/pending", (req, res) => {
+  const recipientId = (req.query.recipient_id as string) || "rosa";
+  const pending = getPendingAdherences(recipientId);
+  res.json({ pending, count: pending.length, recipientId });
+});
+app.post("/agent/adherence/confirm", (req, res) => {
+  const { record_id } = req.body ?? {};
+  if (!record_id)
+    return res.status(400).json({ error: "record_id is required" });
+  const success = confirmAdherenceReminder(record_id);
+  res.json({ success: success.success });
+});
+// #1237: manual vitals logging, charted alongside medication adherence.
+app.use("/agent", createVitalsRouter(createVitalsStore()));
+// #1193: searchable history of past drug interaction checks.
+app.use("/agent", createInteractionChecksRouter(getInteractionCheckStore()));
+// Searchable transcript of agent tool invocations and their outcomes.
+app.use("/agent", createAgentHistoryRouter(getAgentHistoryStore()));
+// #1238: preview a policy change against recent payment history.
+app.post("/agent/policy/preview", (req, res) => {
+  const result = SpendingPolicySchema.safeParse(req.body);
+  if (!result.success) {
+    return res
+      .status(400)
+      .json({ error: "Invalid policy", issues: result.error.issues });
+  }
+  res.json({ impact: previewSpendingPolicy(result.data) });
+});
 app.post("/agent/reset", (req, res) => {
   resetSpendingTracker();
   appendAuditEntry({
@@ -1117,6 +1276,158 @@ app.post(
     }
   },
 );
+
+// --- Allergies endpoints (#1230) ---
+app.get("/agent/allergies", (req, res) => {
+  const recipientId = (req.query.recipient_id as string) || (req.query.recipientId as string) || "rosa";
+  res.json({ allergies: loadRecipientAllergies(recipientId), recipientId });
+});
+
+app.post("/agent/allergies", (req, res) => {
+  const recipientId = (req.query.recipient_id as string) || (req.body.recipientId as string) || "rosa";
+  const { substance, severity, reaction, notes } = req.body ?? {};
+  if (!substance || !severity) {
+    return res.status(400).json({ error: "substance and severity are required" });
+  }
+  const created = addRecipientAllergy({ substance, severity, reaction, notes }, recipientId);
+  res.status(201).json(created);
+});
+
+app.delete("/agent/allergies/:id", (req, res) => {
+  const recipientId = (req.query.recipient_id as string) || "rosa";
+  const success = removeRecipientAllergy(req.params.id, recipientId);
+  res.json({ success });
+});
+
+// --- Co-Caregiver Presence endpoints (#1231) ---
+app.get("/agent/presence", (req, res) => {
+  const recipientId = (req.query.recipient_id as string) || (req.query.recipientId as string) || "rosa";
+  res.json({ presence: loadPresenceMap(recipientId), recipientId });
+});
+
+app.post("/agent/presence/view", (req, res) => {
+  const { itemId, itemType, caregiverId, caregiverName, avatar, recipientId } = req.body ?? {};
+  if (!itemId || !itemType || !caregiverId || !caregiverName) {
+    return res.status(400).json({ error: "itemId, itemType, caregiverId, and caregiverName are required" });
+  }
+  const entry = recordItemView({
+    itemId,
+    itemType,
+    caregiverId,
+    caregiverName,
+    avatar,
+    recipientId,
+  });
+  res.json({ success: true, entry });
+});
+
+// --- Bill OCR endpoint (#1229) ---
+app.post("/bill/ocr", async (req, res) => {
+  const { image } = req.body ?? {};
+  if (!image || typeof image !== "string") {
+    return res.status(400).json({ error: "image (base64) is required" });
+  }
+  try {
+    const result = await extractLineItemsFromBillImage(image);
+    res.json(result);
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || "OCR extraction failed" });
+  }
+});
+
+// --- Price watch endpoint (#1236) ---
+app.post("/agent/price-watch/run", async (req, res) => {
+  const recipientId = (req.query.recipient_id as string) || "rosa";
+  try {
+    const result = await runPriceWatchForRecipient(recipientId);
+    res.json(result);
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || "Price watch failed" });
+  }
+});
+
+// --- Multisig endpoints (#1226) ---
+app.get("/agent/multisig/config", (req, res) => {
+  const recipientId = (req.query.recipient_id as string) || (req.query.recipientId as string) || "rosa";
+  res.json(loadMultisigConfig(recipientId));
+});
+
+app.post("/agent/multisig/config", (req, res) => {
+  const recipientId = (req.query.recipient_id as string) || (req.body.recipientId as string) || "rosa";
+  const { enabled, thresholdAmount, coSigners, timeWindowHours } = req.body ?? {};
+  const current = loadMultisigConfig(recipientId);
+  const updated = {
+    recipientId,
+    enabled: typeof enabled === "boolean" ? enabled : current.enabled,
+    thresholdAmount: typeof thresholdAmount === "number" ? thresholdAmount : current.thresholdAmount,
+    coSigners: Array.isArray(coSigners) ? coSigners : current.coSigners,
+    timeWindowHours: typeof timeWindowHours === "number" ? timeWindowHours : current.timeWindowHours,
+  };
+  saveMultisigConfig(updated, recipientId);
+  res.json({ success: true, config: updated });
+});
+
+app.get("/agent/multisig/pending", (req, res) => {
+  const recipientId = (req.query.recipient_id as string) || (req.query.recipientId as string) || "rosa";
+  const requests = loadMultisigRequests(recipientId);
+  res.json({ requests, count: requests.length, recipientId });
+});
+
+app.post("/agent/multisig/sign", async (req, res) => {
+  const { requestId, signerSecretOrSignedXdr, recipientId = "rosa" } = req.body ?? {};
+  if (!requestId || !signerSecretOrSignedXdr) {
+    return res.status(400).json({ error: "requestId and signerSecretOrSignedXdr are required" });
+  }
+  try {
+    const result = await signAndSubmitMultisigRequest(requestId, signerSecretOrSignedXdr, recipientId);
+    res.json(result);
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || "Failed to sign multisig request" });
+  }
+});
+
+app.post("/agent/multisig/reject", (req, res) => {
+  const { requestId, reason, recipientId = "rosa" } = req.body ?? {};
+  if (!requestId) {
+    return res.status(400).json({ error: "requestId is required" });
+  }
+  try {
+    const result = rejectMultisigRequest(requestId, reason, recipientId);
+    res.json(result);
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || "Failed to reject multisig request" });
+  }
+});
+
+// --- Medication Dosage History endpoints (#1227) ---
+app.get("/agent/medications/history", (req, res) => {
+  const recipientId = (req.query.recipient_id as string) || (req.query.recipientId as string) || "rosa";
+  const medicationName = (req.query.medication_name as string) || (req.query.medicationName as string) || undefined;
+  const history = getMedicationHistory(recipientId, medicationName);
+  res.json({ history, recipientId });
+});
+
+app.post("/agent/medications/dosage", (req, res) => {
+  const { recipientId = "rosa", medicationName, newDosage, newFrequency, reason, prescriber } = req.body ?? {};
+  if (!medicationName || !newDosage || !newFrequency) {
+    return res.status(400).json({ error: "medicationName, newDosage, and newFrequency are required" });
+  }
+  try {
+    const entry = recordDosageChange(
+      {
+        medicationName,
+        newDosage,
+        newFrequency,
+        reason,
+        prescriber,
+      },
+      recipientId,
+    );
+    res.status(201).json({ success: true, entry });
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || "Failed to record dosage change" });
+  }
+});
 
 // ============================================================
 // START
@@ -1185,6 +1496,37 @@ async function startWalletBalanceScheduler(): Promise<void> {
   logger.info({ expr }, "wallet balance scheduler armed");
 }
 
+async function startPriceWatchScheduler(): Promise<void> {
+  if (process.env.PRICE_WATCH_ENABLED === "0") return;
+  const cronExpr = process.env.PRICE_WATCH_CRON || "0 8 * * *";
+
+  let cron: any;
+  try {
+    cron = await import("node-cron");
+  } catch {
+    logger.warn(
+      "price-watch scheduler enabled but node-cron not installed — falling back to setInterval(24h)",
+    );
+    setInterval(() => {
+      runPriceWatchForRecipient("rosa").catch((err) =>
+        logger.warn({ err: err?.message }, "[price-watch] error in interval run"),
+      );
+    }, 24 * 60 * 60_000);
+    return;
+  }
+
+  const expr = cron.validate?.(cronExpr) ? cronExpr : "0 8 * * *";
+  cron.schedule(expr, async () => {
+    try {
+      await runPriceWatchForRecipient("rosa");
+    } catch (err: any) {
+      logger.warn({ err: err?.message }, "[price-watch] error in scheduled run");
+    }
+  });
+
+  logger.info({ expr }, "medication price-watch scheduler armed");
+}
+
 export async function bootAccountCheck(
   serverInstance: Horizon.Server = horizonServer,
   publicKey: string = agentKeypair.publicKey(),
@@ -1233,6 +1575,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       "CareGuard Unified Server started",
     );
     await startWalletBalanceScheduler();
+    startOrderStatusReminderCron();
   });
 
   gracefulShutdown({

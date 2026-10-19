@@ -12,6 +12,10 @@ import { z } from "zod";
 const recipientIdSchema = z.string().min(1).optional();
 const amountSchema = z.union([z.number(), z.string()]);
 
+/** get_handoff_notes page size (#1180). */
+export const HANDOFF_NOTES_TOOL_DEFAULT = 3;
+export const HANDOFF_NOTES_TOOL_MAX = 10;
+
 export const TOOL_INPUT_SCHEMAS = {
   compare_pharmacy_prices: z
     .object({
@@ -23,7 +27,10 @@ export const TOOL_INPUT_SCHEMAS = {
     .strict(),
   audit_medical_bill: z
     .object({
-      line_items_json: z.string().min(1),
+      line_items_json: z.string().min(1).optional(),
+      line_items: z.any().optional(),
+      provider_id: z.string().optional(),
+      provider_name: z.string().optional(),
       recipient_id: recipientIdSchema,
     })
     .strict(),
@@ -48,6 +55,8 @@ export const TOOL_INPUT_SCHEMAS = {
       amount: amountSchema,
       days_supply: amountSchema.optional(),
       recipient_id: recipientIdSchema,
+      cost_split: z.any().optional(),
+      skip_approval: z.boolean().optional(),
     })
     .strict(),
   pay_bill: z
@@ -57,6 +66,8 @@ export const TOOL_INPUT_SCHEMAS = {
       description: z.string().min(1),
       amount: amountSchema,
       recipient_id: recipientIdSchema,
+      cost_split: z.any().optional(),
+      skip_approval: z.boolean().optional(),
     })
     .strict(),
   check_spending_policy: z
@@ -87,6 +98,15 @@ export const TOOL_INPUT_SCHEMAS = {
       facility: z.string().optional(),
       caregiver_name: z.string().optional(),
       caregiver_email: z.string().optional(),
+      reason: z
+        .enum([
+          "duplicate_charge",
+          "coding_error",
+          "balance_billing",
+          "unbundling",
+          "general_dispute",
+        ])
+        .optional(),
       recipient_id: recipientIdSchema,
     })
     .strict(),
@@ -98,6 +118,12 @@ export const TOOL_INPUT_SCHEMAS = {
   confirm_adherence: z
     .object({
       record_id: z.string().min(1),
+    })
+    .strict(),
+  get_handoff_notes: z
+    .object({
+      recipient_id: recipientIdSchema,
+      limit: z.number().int().min(1).max(HANDOFF_NOTES_TOOL_MAX).optional(),
     })
     .strict(),
 } as const;

@@ -22,6 +22,7 @@ import {
   type LineItem,
   validateBillAuditRequest,
 } from "../../shared/bill-audit.ts";
+import { getProviderBillHistoryStore } from "./history.ts";
 import {
   applyX402Middleware,
   NETWORK,
@@ -34,6 +35,7 @@ import { requestLifecycleMiddleware } from "../../shared/request-lifecycle.ts";
 import { gracefulShutdown } from "../../shared/graceful-shutdown.ts";
 import { sanitizeUserString } from "../../shared/sanitize.ts";
 import { billAuditOversizedRejectionsTotal } from "../../shared/metrics.ts";
+import { extractLineItemsFromBillImage } from "../../shared/bill-ocr.ts";
 
 const PORT = parseInt(process.env.BILL_AUDIT_API_PORT || "3002", 10);
 const PAY_TO = process.env.BILL_PROVIDER_PUBLIC_KEY;
@@ -208,8 +210,24 @@ interface BillItem {
   chargedAmount: number;
 }
 
-export function auditBill(lineItems: BillItem[]) {
-  return sharedAuditBill(lineItems, {
+export function auditBill(
+  lineItems: BillItem[],
+  options?: { providerId?: string; providerName?: string; recipientId?: string },
+) {
+  const historyStore = getProviderBillHistoryStore();
+  let providerHistoryLookup;
+  if (options?.providerId) {
+    providerHistoryLookup = (cptCode: string, chargedAmount: number) => {
+      return historyStore.compareAgainstHistory({
+        providerId: options.providerId!,
+        providerName: options.providerName,
+        cptCode,
+        currentChargedAmount: chargedAmount,
+      });
+    };
+  }
+
+  const result = sharedAuditBill(lineItems, {
     network: NETWORK,
     payTo: PAY_TO,
     duplicateAllowlist,
@@ -219,7 +237,19 @@ export function auditBill(lineItems: BillItem[]) {
     upcodedMultiplier: BILL_AUDIT_UPCODED_MULTIPLIER,
     ratesAsOf: RATES_AS_OF,
     ratesValidUntil: RATES_VALID_UNTIL,
+    providerHistoryLookup,
   });
+
+  if (options?.providerId) {
+    historyStore.recordBillCharges({
+      providerId: options.providerId,
+      providerName: options.providerName || "Healthcare Provider",
+      recipientId: options.recipientId,
+      lineItems,
+    });
+  }
+
+  return result;
 }
 
 export const app = express();
@@ -353,7 +383,13 @@ app.post("/bill/audit", (req, res) => {
       ...item,
       description: sanitizeUserString(item.description),
     }));
-    res.json(auditBill(sanitizedLineItems));
+    res.json(
+      auditBill(sanitizedLineItems, {
+        providerId: validatedData.providerId,
+        providerName: validatedData.providerName,
+        recipientId: validatedData.recipientId,
+      }),
+    );
   } catch (error) {
     if (error instanceof BillAuditValidationError) {
       const validationError = error as BillAuditValidationError;
@@ -388,6 +424,20 @@ app.use(
     next(err);
   },
 );
+
+// --- Bill OCR endpoint (#1229) ---
+app.post("/bill/ocr", async (req, res) => {
+  const { image } = req.body ?? {};
+  if (!image || typeof image !== "string") {
+    return res.status(400).json({ error: "image (base64) is required" });
+  }
+  try {
+    const result = await extractLineItemsFromBillImage(image);
+    res.json(result);
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || "OCR extraction failed" });
+  }
+});
 
 let isDraining = false;
 app.get("/ready", (_req, res) => {

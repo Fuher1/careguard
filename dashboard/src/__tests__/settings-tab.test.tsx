@@ -172,4 +172,11 @@ describe("SettingsTab — agent status (Issue #79)", () => {
     render(<SettingsTab {...buildProps({ agentInfo: { network: "stellar:testnet" } as any })} />);
     expect(screen.getByText("Stellar Testnet")).toBeTruthy();
   });
+
+  it("shows notification preference controls with critical safety protections", () => {
+    render(<SettingsTab {...buildProps()} />);
+    expect(screen.getByText(/Notification preference center/i)).toBeTruthy();
+    expect(screen.getByLabelText(/Policy blocked.*email/i)).toBeTruthy();
+    expect(screen.getByLabelText(/Critical safety alerts.*email/i)).toBeTruthy();
+  });
 });
