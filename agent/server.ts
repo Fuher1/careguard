@@ -182,7 +182,6 @@ app.get("/metrics", metricsHandler());
 
 // Per-run tool call cap
 const MAX_TOOL_CALLS_PER_RUN = parseInt(process.env.MAX_TOOL_CALLS_PER_RUN || "30", 10);
-let toolCallCapHitsTotal = 0;
 
 // ── Persisted agent-pause state (Issue #17) ──────────────────────────────────
 // Persists to data/agent-state.json so a paused agent stays paused across

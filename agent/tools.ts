@@ -1246,18 +1246,29 @@ function loadPolicy(recipientId?: string): SpendingPolicy {
   const file = getPolicyFile(recipientId);
   if (!existsSync(file)) return { ...DEFAULT_POLICY };
   try {
-    return JSON.parse(readFileSync(file, "utf-8"));
+    const parsed = JSON.parse(readFileSync(file, "utf-8"));
+    const validated = SpendingPolicySchema.safeParse(parsed);
+    if (!validated.success) {
+      logger.warn(
+        { file, errors: validated.error.issues },
+        "[Persistence] policy.json schema invalid",
+      );
+      rotateCorruptedFile(file);
+      return { ...DEFAULT_POLICY };
+    }
+    return validated.data;
   } catch (err: any) {
     logger.warn(
       { file, error: err.message },
       "[Persistence] policy.json is corrupted; falling back to the default policy",
     );
+    rotateCorruptedFile(file);
     return { ...DEFAULT_POLICY };
   }
 }
 
 function savePolicy(policy: SpendingPolicy, recipientId?: string) {
-  writeFileSync(getPolicyFile(recipientId), JSON.stringify(policy, null, 2));
+  writeAtomically(getPolicyFile(recipientId), JSON.stringify(policy, null, 2));
 }
 
 function assertValidSpendingPolicy(policy: SpendingPolicy) {

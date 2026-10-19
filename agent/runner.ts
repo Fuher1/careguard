@@ -14,6 +14,7 @@ import { setAgentRunId, getRequestId } from "../shared/request-context.ts";
 import { redactPII } from "../shared/redact.ts";
 import {
   agentToolCallsTotal,
+  agentToolCallCapExceededTotal,
   agentLlmTokensTotal,
   agentLlmIterationTokens,
   agentLlmContextUsageRatio,
@@ -403,6 +404,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
     if (runToolCalls + message.tool_calls.length > maxToolCallsPerRun) {
       truncated = true;
       events.push({ kind: "tool_call_cap_reached" });
+      agentToolCallCapExceededTotal.inc();
       appendAuditEntry({
         event: "agent.tool_cap_exceeded",
         actor: "agent",
