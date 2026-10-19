@@ -6,6 +6,7 @@ import { copyText } from "../../lib/clipboard";
 import type { RecipientProfile } from "../../lib/types";
 import { ConfirmDialog } from "../primitives/confirm-dialog";
 import { TxLink } from "../primitives/tx-link";
+import { AgentHistorySection } from "../agent-history-section";
 import { formatTime, getTranslations, type Locale } from "../../i18n";
 import type {
   AgentLogEntry,
@@ -584,6 +585,7 @@ export function ActivityTab({
           </>
         )}
       </div>
+      <AgentHistorySection />
     </div>
   );
 }
