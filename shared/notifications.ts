@@ -46,9 +46,9 @@ const NOTIFICATION_EMAIL_FROM =
 const PUSH_WEBHOOK_URL = process.env.PUSH_WEBHOOK_URL;
 
 const ICONS: Record<NotificationLevel, string> = {
-  info: "",
-  warning: "",
-  critical: "",
+  info: "ℹ️",
+  warning: "⚠️",
+  critical: "🚨",
 };
 
 export interface NotificationOptIn {
@@ -202,6 +202,7 @@ async function sendSms(n: Notification): Promise<void> {
 export async function notify(
   n: Notification,
   preferences: Partial<Record<NotificationEventType, Partial<NotificationOptIn>>> = DEFAULT_NOTIFICATION_PREFERENCES,
+  optIn: Partial<NotificationOptIn> = DEFAULT_NOTIFICATION_OPT_IN,
 ): Promise<void> {
   const line = `${ICONS[n.level]} [${n.level.toUpperCase()}] ${n.title} — ${n.description}`;
   if (n.level === "critical" || n.level === "warning") {
@@ -216,6 +217,10 @@ export async function notify(
     channel === "all" ? ["email", "sms", "slack"] : [channel];
 
   for (const nextChannel of channelsToSend) {
+    // Respect caregiver opt-in: if the channel is explicitly disabled, skip it (#1038).
+    if (optIn[nextChannel] === false) {
+      continue;
+    }
     if (!shouldSendNotification(eventType, nextChannel, preferences)) {
       continue;
     }
@@ -233,6 +238,8 @@ export async function notify(
   // Push is dispatched independently — a failure here does not block the
   // other channels, which act as the fallback.
   if (channel === "push" || channel === "all") {
-    await sendPush(n);
+    if (optIn.push !== false) {
+      await sendPush(n);
+    }
   }
 }

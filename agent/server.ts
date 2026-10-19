@@ -55,12 +55,15 @@ import {
   SpendingPolicySchema,
   previewSpendingPolicy,
   getDataDir,
-  payForMedication,
-  payBill,
+  approvePendingTransaction,
 } from "./tools.ts";
 import { getAdherenceTimeline, getPendingAdherences, skipAdherence } from "../shared/adherence.ts";
 import { createVitalsStore } from "../services/vitals/db.ts";
 import { createVitalsRouter } from "../services/vitals/routes.ts";
+import { getInteractionCheckStore } from "../services/interaction-checks/db.ts";
+import { createInteractionChecksRouter } from "../services/interaction-checks/routes.ts";
+import { getAgentHistoryStore } from "../services/agent-history/db.ts";
+import { createAgentHistoryRouter } from "../services/agent-history/routes.ts";
 import { createCareRecipientsStore } from "../services/care-recipients/db.ts";
 import { authorizeApprovalActor, createDelegationsRouter } from "../services/care-recipients/delegation.ts";
 import { notify } from "../shared/notifications.ts";
@@ -336,64 +339,35 @@ app.post("/agent/approvals/:txId", async (req, res) => {
     (req.body.recipient_id as string) ||
     "rosa";
   setCurrentRecipient(recipientId);
+
+  // Validate the transaction exists and is still pending before acting.
   const tracker = getSpendingTracker();
-  const txIndex = tracker.transactions.findIndex((t: any) => t.id === txId);
-  if (txIndex === -1)
-    return res.status(404).json({ error: "Transaction not found" });
-  const tx = tracker.transactions[txIndex];
+  const tx = tracker.transactions.find((t: any) => t.id === txId);
+  if (!tx) return res.status(404).json({ error: "Transaction not found" });
   if (tx.status !== "pending")
     return res.status(400).json({ error: "Transaction is not pending" });
 
   if (!approve) {
     (tx as any).status = "rejected";
+    tracker.transactions = tracker.transactions.map((t: any) =>
+      t.id === txId ? tx : t,
+    );
     saveSpending(tracker);
-    recordDecision("rejected");
-    return res.json({ success: true, status: "rejected", delegated: authz.delegated });
+    return res.json({ success: true, status: "rejected" });
   }
 
   try {
-    let result: any;
-    if (tx.category === "medications") {
-      const match = tx.description.match(/(.+) from (.+)/);
-      if (!match) throw new Error("Cannot parse transaction description");
-      const [, drugName, pharmacyName] = match;
-      const pharmacyId = tx.recipient;
-      result = await payForMedication(
-        pharmacyId,
-        pharmacyName,
-        drugName,
-        tx.amount,
-        true,
-      );
-    } else if (tx.category === "bills") {
-      const match = tx.description.match(/(.+) — (.+)/);
-      if (!match) throw new Error("Cannot parse transaction description");
-      const [, description, providerName] = match;
-      const providerId = tx.recipient;
-      result = await payBill(
-        providerId,
-        providerName,
-        description,
-        tx.amount,
-        true,
-      );
-    } else {
-      throw new Error("Unknown transaction category");
-    }
-
+    // Delegate to the unified approvePendingTransaction path so the HTTP route
+    // and the background scanner share audit logging, budget bookkeeping, and
+    // status transitions (#1029).
+    const result = await approvePendingTransaction(txId);
     if (result.success) {
-      tx.status = "completed";
-      tx.stellarTxHash = result.transaction?.stellarTxHash;
-      tracker.transactions[txIndex] = tx;
-      saveSpending(tracker);
       return res.json({
         success: true,
         status: "completed",
         transaction: result.transaction,
       });
     } else {
-      (tx as any).status = "rejected";
-      saveSpending(tracker);
       return res
         .status(400)
         .json({ success: false, error: result.error, status: "rejected" });
@@ -763,6 +737,8 @@ app.post("/agent/adherence/skip", (req, res) => {
 app.use("/agent", createVitalsRouter(createVitalsStore()));
 // #1193: searchable history of past drug interaction checks.
 app.use("/agent", createInteractionChecksRouter(getInteractionCheckStore()));
+// Searchable transcript of agent tool invocations and their outcomes.
+app.use("/agent", createAgentHistoryRouter(getAgentHistoryStore()));
 
 // --- Dispute letter endpoint (#266) ---
 app.post("/agent/dispute-letter", (req, res) => {

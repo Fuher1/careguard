@@ -826,6 +826,7 @@ export function ActivityTab({
           </>
         )}
       </div>
+      <AgentHistorySection />
     </div>
   );
 }

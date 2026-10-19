@@ -51,6 +51,7 @@ import {
   serializeToolResultForPrompt,
 } from "./tool-result.ts";
 import { recordInteractionCheck } from "../services/interaction-checks/db.ts";
+import { recordAgentToolCall } from "../services/agent-history/db.ts";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -342,10 +343,11 @@ function calculateMaxTokens(
   maxTokensSummary: number,
 ): number {
   if (iteration === 0) return maxTokensSimple;
+  // Final synthesis iteration: always grant the full summary budget so complex
+  // multi-step runs (>3 tool results) are not silently truncated (#1033).
+  if (iteration >= maxIterations - 1) return maxTokensSummary;
   if (previousToolResultCount > 0 && previousToolResultCount <= 3)
     return maxTokensToolResult;
-  if (previousToolResultCount > 3) return maxTokensSimple;
-  if (iteration > 8) return maxTokensSummary;
   return maxTokensSimple;
 }
 
@@ -423,7 +425,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
         tools: LLM_TOOLS,
         messages,
       });
-      agentLlmLatencyMs.set({ model }, performance.now() - startTime);
+      agentLlmLatencyMs.observe({ model }, performance.now() - startTime);
     } catch (llmErr: any) {
       logger.error({ err: llmErr.message, iteration }, "LLM API error");
       agentLlmErrorTotal.inc();
@@ -527,7 +529,18 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
     runToolCalls += message.tool_calls.length;
 
     for (const toolCall of message.tool_calls) {
-      if (toolCall.type !== "function") continue;
+      if (toolCall.type !== "function") {
+        // The OpenAI-compatible API requires one tool-role response per tool_call id
+        // in the preceding assistant message. Silently skipping would leave the
+        // conversation in an invalid state and cause the next completion to 400 (#1037).
+        logger.warn({ toolCallType: toolCall.type, toolCallId: toolCall.id }, "unsupported tool_call type — emitting error stub");
+        messages.push({
+          role: "tool",
+          tool_call_id: toolCall.id,
+          content: JSON.stringify({ ok: false, error: `Unsupported tool_call type: ${toolCall.type}` }),
+        });
+        continue;
+      }
       const fnName = toolCall.function.name;
       let fnArgs: any;
       try {
@@ -552,6 +565,19 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
         result = { error: err.message };
         toolCalls.push({ id: toolCall.id, tool: fnName, input: fnArgs, result });
       }
+
+      // Persisted per-recipient transcript for the dashboard's history view.
+      recordAgentToolCall({
+        recipientId:
+          typeof fnArgs?.recipient_id === "string" && fnArgs.recipient_id
+            ? fnArgs.recipient_id
+            : "rosa",
+        runId,
+        task,
+        tool: fnName,
+        input: fnArgs,
+        result,
+      });
 
       appendAuditEntry({
         event: "tool_call",

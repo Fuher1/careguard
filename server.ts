@@ -115,10 +115,14 @@ import {
   resetSpendingTracker,
   SpendingPolicySchema,
   previewSpendingPolicy,
+  getAdherenceStatus,
+  confirmAdherenceReminder,
 } from "./agent/tools.ts";
+import { getPendingAdherences } from "./shared/adherence.ts";
 import { executeTool, runAgent } from "./agent/runner.ts";
 import { resolveRequestedDosage } from "./services/pharmacy-api/dosage.ts";
 import { createPharmacyPricingStore } from "./services/pharmacy-api/db.ts";
+import { createPricingProvider } from "./shared/pricing-sources.ts";
 import {
   PRICING_DATABASE,
   getPharmacyPrices,
@@ -131,6 +135,8 @@ import { createVitalsStore } from "./services/vitals/db.ts";
 import { createVitalsRouter } from "./services/vitals/routes.ts";
 import { getInteractionCheckStore } from "./services/interaction-checks/db.ts";
 import { createInteractionChecksRouter } from "./services/interaction-checks/routes.ts";
+import { getAgentHistoryStore } from "./services/agent-history/db.ts";
+import { createAgentHistoryRouter } from "./services/agent-history/routes.ts";
 import {
   buildCompareResponse,
   DrugRecordSchema,
@@ -288,6 +294,12 @@ let _profileData = {
     medications: [..._DEFAULT_PROFILE.recipient.medications],
   },
   caregiver: { ..._DEFAULT_PROFILE.caregiver },
+};
+
+// Multi-recipient store (#1028) — seeded from the default profile so
+// recipient_id=rosa resolves on the unified server just like agent/server.ts.
+const _recipientProfiles: Record<string, typeof _DEFAULT_PROFILE.recipient> = {
+  rosa: { ..._DEFAULT_PROFILE.recipient, medications: [..._DEFAULT_PROFILE.recipient.medications] },
 };
 
 // --- Express App ---
@@ -454,6 +466,40 @@ app.patch("/agent/profile", (req, res) => {
   res.json(_profileData);
 });
 
+// --- Multi-recipient endpoints (#1028) ---
+app.get("/agent/recipients", (_req, res) => {
+  res.json({
+    recipients: Object.keys(_recipientProfiles),
+    profiles: _recipientProfiles,
+  });
+});
+
+app.put("/agent/recipients/:recipientId", (req, res) => {
+  const { recipientId } = req.params;
+  const { name, age, medications, doctor, insurance } = req.body ?? {};
+  if (!_recipientProfiles[recipientId]) {
+    _recipientProfiles[recipientId] = {
+      ..._DEFAULT_PROFILE.recipient,
+      name: recipientId,
+      medications: [],
+    };
+  }
+  if (name) {
+    _recipientProfiles[recipientId].name = name;
+    registerKnownNames([name]);
+  }
+  if (typeof age === "number") _recipientProfiles[recipientId].age = age;
+  if (Array.isArray(medications))
+    _recipientProfiles[recipientId].medications = medications;
+  if (doctor) (_recipientProfiles[recipientId] as Record<string, unknown>).doctor = doctor;
+  if (insurance) (_recipientProfiles[recipientId] as Record<string, unknown>).insurance = insurance;
+  // Keep rosa profile in sync with _profileData for the legacy single-profile route.
+  if (recipientId === "rosa") {
+    _profileData.recipient = { ..._recipientProfiles.rosa };
+  }
+  res.json({ success: true, recipient: _recipientProfiles[recipientId] });
+});
+
 // ============================================================
 // PHARMACY PRICE API (was port 3001)
 // ============================================================
@@ -461,6 +507,11 @@ app.patch("/agent/profile", (req, res) => {
 const PHARMACY_ADMIN_TOKEN =
   process.env.PHARMACY_ADMIN_TOKEN || CAREGIVER_TOKEN;
 const pharmacyStore = createPharmacyPricingStore();
+// Activated when PHARMACY_PRICING_PROVIDER is set to a non-static value (#1031).
+const externalPricingProvider =
+  process.env.PHARMACY_PRICING_PROVIDER && process.env.PHARMACY_PRICING_PROVIDER !== "static"
+    ? createPricingProvider(process.env.PHARMACY_PRICING_PROVIDER)
+    : null;
 // Shared with the agent's get_handoff_notes tool (#1180).
 const recipientsStore = getCareRecipientsStore();
 
@@ -665,7 +716,11 @@ app.get(
     const dosage = resolveRequestedDosage(drug, query.dosage, recipient);
 
     try {
-      const prices = pharmacyStore.getPrices(drug);
+      // Use the external pricing provider when configured (#1031); fall back to the
+      // SQLite-backed store which holds admin-managed pricing data.
+      const prices = externalPricingProvider
+        ? await externalPricingProvider.getPrices(drug, query.zip)
+        : pharmacyStore.getPrices(drug);
       const isFallbackZip = Boolean(query.zip && query.zip !== DEFAULT_ZIP_CODE);
       const usedZipCode = isFallbackZip ? DEFAULT_ZIP_CODE : (query.zip || DEFAULT_ZIP_CODE);
 
@@ -1125,10 +1180,29 @@ app.post("/agent/policy", (req, res) => {
   });
   res.json({ success: true, policy: result.data });
 });
+// --- Adherence endpoints (#264) — mirrors agent/server.ts ---
+app.get("/agent/adherence", (req, res) => {
+  const recipientId = (req.query.recipient_id as string) || "rosa";
+  res.json(getAdherenceStatus(recipientId));
+});
+app.get("/agent/adherence/pending", (req, res) => {
+  const recipientId = (req.query.recipient_id as string) || "rosa";
+  const pending = getPendingAdherences(recipientId);
+  res.json({ pending, count: pending.length, recipientId });
+});
+app.post("/agent/adherence/confirm", (req, res) => {
+  const { record_id } = req.body ?? {};
+  if (!record_id)
+    return res.status(400).json({ error: "record_id is required" });
+  const success = confirmAdherenceReminder(record_id);
+  res.json({ success: success.success });
+});
 // #1237: manual vitals logging, charted alongside medication adherence.
 app.use("/agent", createVitalsRouter(createVitalsStore()));
 // #1193: searchable history of past drug interaction checks.
 app.use("/agent", createInteractionChecksRouter(getInteractionCheckStore()));
+// Searchable transcript of agent tool invocations and their outcomes.
+app.use("/agent", createAgentHistoryRouter(getAgentHistoryStore()));
 // #1238: preview a policy change against recent payment history.
 app.post("/agent/policy/preview", (req, res) => {
   const result = SpendingPolicySchema.safeParse(req.body);
