@@ -209,7 +209,11 @@ export async function executeTool(
         } else {
           items = input.line_items || input.line_items_json;
         }
-        result = await auditBill(items);
+        result = await auditBill(items, {
+          providerId: (input.provider_id as string) || provId,
+          providerName: (input.provider_name as string) || provName,
+          recipientId: rid,
+        });
         break;
       }
       case "fetch_rosa_bill":
@@ -246,9 +250,11 @@ export async function executeTool(
           pharmName || "",
           drugN || "",
           amt,
-          false,
-          30,
+          Boolean(input.skip_approval),
+          Number(input.days_supply ?? 30),
           memo,
+          rid,
+          input.cost_split as any,
         );
         break;
       case "pay_bill":
@@ -257,8 +263,10 @@ export async function executeTool(
           provName || "",
           desc || "",
           amt,
-          false,
+          Boolean(input.skip_approval),
           memo,
+          rid,
+          input.cost_split as any,
         );
         break;
       case "check_spending_policy":
@@ -295,6 +303,8 @@ export async function executeTool(
             caregiverName: input.caregiver_name as string,
             caregiverEmail: input.caregiver_email as string,
           },
+          input.reason as any,
+          rid,
         );
         break;
       }
@@ -332,10 +342,11 @@ function calculateMaxTokens(
   maxTokensSummary: number,
 ): number {
   if (iteration === 0) return maxTokensSimple;
+  // Final synthesis iteration: always grant the full summary budget so complex
+  // multi-step runs (>3 tool results) are not silently truncated (#1033).
+  if (iteration >= maxIterations - 1) return maxTokensSummary;
   if (previousToolResultCount > 0 && previousToolResultCount <= 3)
     return maxTokensToolResult;
-  if (previousToolResultCount > 3) return maxTokensSimple;
-  if (iteration > 8) return maxTokensSummary;
   return maxTokensSimple;
 }
 
@@ -413,7 +424,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
         tools: LLM_TOOLS,
         messages,
       });
-      agentLlmLatencyMs.set({ model }, performance.now() - startTime);
+      agentLlmLatencyMs.observe({ model }, performance.now() - startTime);
     } catch (llmErr: any) {
       logger.error({ err: llmErr.message, iteration }, "LLM API error");
       agentLlmErrorTotal.inc();
@@ -517,7 +528,18 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
     runToolCalls += message.tool_calls.length;
 
     for (const toolCall of message.tool_calls) {
-      if (toolCall.type !== "function") continue;
+      if (toolCall.type !== "function") {
+        // The OpenAI-compatible API requires one tool-role response per tool_call id
+        // in the preceding assistant message. Silently skipping would leave the
+        // conversation in an invalid state and cause the next completion to 400 (#1037).
+        logger.warn({ toolCallType: toolCall.type, toolCallId: toolCall.id }, "unsupported tool_call type — emitting error stub");
+        messages.push({
+          role: "tool",
+          tool_call_id: toolCall.id,
+          content: JSON.stringify({ ok: false, error: `Unsupported tool_call type: ${toolCall.type}` }),
+        });
+        continue;
+      }
       const fnName = toolCall.function.name;
       let fnArgs: any;
       try {

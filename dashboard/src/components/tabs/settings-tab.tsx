@@ -3,8 +3,8 @@
 import { useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { copyText } from "../../lib/clipboard";
-import { truncateAddress } from "../../lib/utils";
-import type { CaregiverProfile, RecipientProfile, RecipientAllergy, AllergySeverity } from "../../lib/types";
+import type { CaregiverProfile, RecipientProfile } from "../../lib/types";
+import { RecipientWizard } from "../recipient-wizard";
 import { Toast } from "../primitives/toast";
 import { ConfirmDialog } from "../primitives/confirm-dialog";
 import type { AgentInfo } from "../types";
@@ -18,6 +18,7 @@ import {
   type NotificationChannel,
   type NotificationEventType,
 } from "../../../../shared/notifications";
+import { ConsentSettingsSection } from "../consent-settings-section";
 
 export interface RecipientOption {
   id: string;
@@ -61,6 +62,7 @@ export function SettingsTab({
   const [toastMsg, setToastMsg] = useState<string | null>(null);
   const [toastFallback, setToastFallback] = useState<string | undefined>(undefined);
   const [editing, setEditing] = useState(false);
+  const [showWizard, setShowWizard] = useState(false);
   const [saving, setSaving] = useState(false);
   const [showUnsavedDialog, setShowUnsavedDialog] = useState(false);
   const [pendingNavigation, setPendingNavigation] = useState(false);
@@ -361,14 +363,7 @@ export function SettingsTab({
           setToastFallback(undefined);
         }}
       />
-      {editing && (
-        <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 flex items-start gap-2">
-          <div className="flex-1">
-            <p className="text-xs font-medium text-blue-900">Editing mode active</p>
-            <p className="text-xs text-blue-700 mt-0.5">Save your changes or click Cancel before switching tabs, or your edits will be lost.</p>
-          </div>
-        </div>
-      )}
+      {showWizard && <RecipientWizard onClose={() => setShowWizard(false)} />}
       <div className="bg-white rounded-xl border border-slate-200 p-6">
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-3">
@@ -399,14 +394,23 @@ export function SettingsTab({
               </div>
             )}
           </div>
-          {!editing && (
+          <div className="flex items-center gap-2">
             <button
-              onClick={startEditing}
-              className="px-3 py-1.5 text-xs font-medium bg-sky-50 text-sky-700 border border-sky-200 rounded-lg hover:bg-sky-100 cursor-pointer transition-all"
+              type="button"
+              onClick={() => setShowWizard(true)}
+              className="px-3 py-1.5 text-xs font-medium bg-emerald-50 text-emerald-700 border border-emerald-200 rounded-lg hover:bg-emerald-100 cursor-pointer transition-all"
             >
-              Edit
+              New Wizard
             </button>
-          )}
+            {!editing && (
+              <button
+                onClick={startEditing}
+                className="px-3 py-1.5 text-xs font-medium bg-sky-50 text-sky-700 border border-sky-200 rounded-lg hover:bg-sky-100 cursor-pointer transition-all"
+              >
+                Edit
+              </button>
+            )}
+          </div>
         </div>
         <div className="grid grid-cols-2 gap-4">
           <div>
@@ -629,7 +633,10 @@ export function SettingsTab({
       </div>
 
       {selectedRecipientId && (
-        <LinkedCaregiversSection recipientId={selectedRecipientId} locale={locale} />
+        <>
+          <LinkedCaregiversSection recipientId={selectedRecipientId} locale={locale} />
+          <ConsentSettingsSection recipientId={selectedRecipientId} />
+        </>
       )}
 
       <div className="bg-white rounded-xl border border-slate-200 p-6">

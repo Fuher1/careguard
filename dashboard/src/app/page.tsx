@@ -27,6 +27,8 @@ import { AGENT_URL } from "../lib/agent-url";
 
 
 import { DEFAULT_LOCALE } from "../i18n";
+import { caregiverFetch } from "../lib/caregiver-fetch";
+import { DEFAULT_CONSENT_SETTINGS, type ConsentSettings } from "../lib/types";
 
 export default function Dashboard() {
   // In production, AGENT_URL is null when NEXT_PUBLIC_API_URL is unset.
@@ -61,6 +63,27 @@ export default function Dashboard() {
   const localeParam = searchParams.get("locale");
   const locale: Locale = isValidLocale(localeParam || "") ? localeParam as Locale : "en";
   const state = useAgentState({ activeTab });
+
+  const [consentSettings, setConsentSettings] = useState<ConsentSettings>(DEFAULT_CONSENT_SETTINGS);
+
+  useEffect(() => {
+    if (!selectedId) return;
+    let cancelled = false;
+    caregiverFetch(`/recipients/${encodeURIComponent(selectedId)}/consent`)
+      .then(async (res) => {
+        if (cancelled) return;
+        if (res.ok) {
+          const data = await res.json();
+          if (data?.consent) {
+            setConsentSettings(data.consent);
+          }
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedId, activeTab]);
 
   const ariaLogRef = useRef<number | null>(null);
   const [debouncedAriaLog, setDebouncedAriaLog] = useState<string[]>([]);
@@ -130,6 +153,8 @@ export default function Dashboard() {
             agentResult={state.agentResult}
             recipient={recipient}
             locale={locale}
+            currentCaregiver={caregiver}
+            consentSettings={consentSettings}
           />
         )}
         {activeTab === "bills" && (
@@ -138,6 +163,7 @@ export default function Dashboard() {
             recipient={recipient}
             locale={locale}
             currentCaregiver={caregiver}
+            consentSettings={consentSettings}
           />
         )}
         {activeTab === "approvals" && (
@@ -174,6 +200,10 @@ export default function Dashboard() {
             onRetryWalletBalance={state.retryWalletBalance}
             loadingAgentInfo={state.loadingAgentInfo}
             spending={state.spending}
+            locale={locale}
+            currentCaregiver={caregiver}
+            consentSettings={consentSettings}
+            recipientId={selectedId}
           />
         )}
         {activeTab === "activity" && (
@@ -198,6 +228,7 @@ export default function Dashboard() {
         )}
         {activeTab === "tasks" && (
           <TasksTab recipientId={selectedId ?? recipient.id} locale={locale} />
+        )}
         {activeTab === "notes" && (
           <HandoffNotesTab
             recipientId={selectedId}

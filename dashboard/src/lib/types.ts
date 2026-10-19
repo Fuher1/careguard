@@ -299,3 +299,61 @@ export const HandoffNoteSchema = z.object({
 });
 
 export type HandoffNote = z.infer<typeof HandoffNoteSchema>;
+
+// ── Granular Data-Sharing Consent (#1218) ─────────────────────────────────────
+
+export interface RoleConsent {
+  medications: boolean;
+  bills: boolean;
+  wallet: boolean;
+}
+
+export interface ConsentSettings {
+  owner: RoleConsent;
+  "co-caregiver": RoleConsent;
+  viewer: RoleConsent;
+}
+
+export const DEFAULT_CONSENT_SETTINGS: ConsentSettings = {
+  owner: { medications: true, bills: true, wallet: true },
+  "co-caregiver": { medications: true, bills: true, wallet: true },
+  viewer: { medications: true, bills: true, wallet: true },
+};
+
+// ── Cost Splitting Ledger (#1220) ───────────────────────────────────────────
+
+export interface CostSplitShare {
+  caregiverId: string;
+  caregiverName: string;
+  amount: number;
+  status: "owed" | "settled";
+  settledAt?: string;
+  settledBy?: string;
+}
+
+export interface CostSplit {
+  id: string;
+  transactionId: string;
+  recipientId: string;
+  totalAmount: number;
+  payerId: string;
+  payerName: string;
+  description?: string;
+  shares: CostSplitShare[];
+  createdAt: string;
+}
+
+export interface ContributorBalance {
+  fromCaregiverId: string;
+  fromCaregiverName: string;
+  toCaregiverId: string;
+  toCaregiverName: string;
+  amount: number;
+}
+
+export interface ContributorBalanceSummary {
+  balances: ContributorBalance[];
+  totalOwed: number;
+  totalSettled: number;
+}
+
