@@ -115,7 +115,10 @@ import {
   resetSpendingTracker,
   SpendingPolicySchema,
   previewSpendingPolicy,
+  getAdherenceStatus,
+  confirmAdherenceReminder,
 } from "./agent/tools.ts";
+import { getPendingAdherences } from "./shared/adherence.ts";
 import { executeTool, runAgent } from "./agent/runner.ts";
 import { resolveRequestedDosage } from "./services/pharmacy-api/dosage.ts";
 import { createPharmacyPricingStore } from "./services/pharmacy-api/db.ts";
@@ -1174,6 +1177,23 @@ app.post("/agent/policy", (req, res) => {
     },
   });
   res.json({ success: true, policy: result.data });
+});
+// --- Adherence endpoints (#264) — mirrors agent/server.ts ---
+app.get("/agent/adherence", (req, res) => {
+  const recipientId = (req.query.recipient_id as string) || "rosa";
+  res.json(getAdherenceStatus(recipientId));
+});
+app.get("/agent/adherence/pending", (req, res) => {
+  const recipientId = (req.query.recipient_id as string) || "rosa";
+  const pending = getPendingAdherences(recipientId);
+  res.json({ pending, count: pending.length, recipientId });
+});
+app.post("/agent/adherence/confirm", (req, res) => {
+  const { record_id } = req.body ?? {};
+  if (!record_id)
+    return res.status(400).json({ error: "record_id is required" });
+  const success = confirmAdherenceReminder(record_id);
+  res.json({ success: success.success });
 });
 // #1237: manual vitals logging, charted alongside medication adherence.
 app.use("/agent", createVitalsRouter(createVitalsStore()));
