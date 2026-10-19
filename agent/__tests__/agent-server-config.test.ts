@@ -131,7 +131,7 @@ describe("agent server root metadata", () => {
 });
 
 describe("POST /webhooks/stellar/deposit", () => {
-  it("returns a logged 400 for validly signed malformed JSON", async () => {
+  it("returns a 400 for validly signed malformed JSON", async () => {
     const body = '{"event":';
     const webhookId = "evt-malformed-json";
     const res = await signedWebhook(body, webhookId);

@@ -256,7 +256,14 @@ app.use(rateLimiters.default);
 
 applySecurityMiddleware(app);
 app.use(createCorsMiddleware());
-app.use(express.json({ limit: process.env.JSON_BODY_LIMIT ?? "20kb" }));
+app.use(
+  express.json({
+    limit: process.env.JSON_BODY_LIMIT ?? "20kb",
+    type: (req) =>
+      req.path !== "/webhooks/stellar/deposit" &&
+      Boolean(req.is("application/json")),
+  }),
+);
 app.use(requestLifecycleMiddleware());
 app.get("/metrics", metricsHandler());
 
