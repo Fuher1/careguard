@@ -10,6 +10,8 @@
 
 import "dotenv/config";
 import { createHash } from "crypto";
+import { resolve } from "path";
+import { fileURLToPath } from "url";
 import {
   existsSync,
   mkdirSync,
@@ -384,8 +386,8 @@ app.get("/", (_req, res) => {
     network: `stellar:${STELLAR_CONFIG.networkType}`,
     llm: `${LLM_BASE_URL} / ${LLM_MODEL}`,
     agentWallet: agentKeypair.publicKey(),
-    recipients: ["rosa"],
-    caregiver: "Maria Garcia",
+    recipients: Object.keys(recipientProfiles),
+    caregiver: caregiverProfile.name,
     paused: agentPaused,
   });
 });
@@ -980,9 +982,24 @@ app.post(
   express.raw({ type: "application/json" }),
   verifyWebhook(),
   (req: express.Request, res: express.Response) => {
-    const payload = JSON.parse(
-      Buffer.isBuffer(req.body) ? req.body.toString("utf8") : String(req.body),
-    ) as Record<string, unknown>;
+    const rawBody = Buffer.isBuffer(req.body)
+      ? req.body.toString("utf8")
+      : String(req.body);
+    let payload: Record<string, unknown>;
+    try {
+      payload = JSON.parse(rawBody) as Record<string, unknown>;
+    } catch (err) {
+      logger.warn(
+        {
+          err,
+          webhookId: req.headers["x-webhook-id"],
+          bodyLength: rawBody.length,
+        },
+        "invalid JSON in stellar deposit webhook",
+      );
+      res.status(400).json({ error: "Invalid JSON in webhook payload" });
+      return;
+    }
     logger.info({ payload }, "stellar deposit webhook received");
     res.status(200).json({ status: "received" });
   },
@@ -1015,22 +1032,27 @@ app.get("/ready", (_req, res) => {
 
 export { app };
 
-const server = app.listen(PORT, async () => {
-  logger.info(
-    {
-      port: PORT,
-      network: STELLAR_CONFIG.networkType,
-      horizonUrl: STELLAR_CONFIG.horizonUrl,
-      llm: LLM_MODEL,
-      llmBaseUrl: LLM_BASE_URL,
-      llmToolTemperature: LLM_TOOL_TEMPERATURE,
-      llmSummaryTemperature: LLM_SUMMARY_TEMPERATURE,
-      wallet: agentKeypair.publicKey(),
-    },
-    "CareGuard Agent started",
-  );
-  await verifyWallet();
-  startOrderStatusReminderCron();
-});
+if (
+  process.argv[1] &&
+  fileURLToPath(import.meta.url) === resolve(process.argv[1])
+) {
+  const server = app.listen(PORT, async () => {
+    logger.info(
+      {
+        port: PORT,
+        network: STELLAR_CONFIG.networkType,
+        horizonUrl: STELLAR_CONFIG.horizonUrl,
+        llm: LLM_MODEL,
+        llmBaseUrl: LLM_BASE_URL,
+        llmToolTemperature: LLM_TOOL_TEMPERATURE,
+        llmSummaryTemperature: LLM_SUMMARY_TEMPERATURE,
+        wallet: agentKeypair.publicKey(),
+      },
+      "CareGuard Agent started",
+    );
+    await verifyWallet();
+    startOrderStatusReminderCron();
+  });
 
-gracefulShutdown({ server, onDrainStart: () => { isDraining = true; } });
+  gracefulShutdown({ server, onDrainStart: () => { isDraining = true; } });
+}
