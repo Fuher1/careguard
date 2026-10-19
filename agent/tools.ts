@@ -609,14 +609,18 @@ const DEFAULT_POLICY: SpendingPolicy = {
   notifications: { email: false, sms: false },
 };
 
-// Helper: Get tool fee from policy, throw if not configured
-function getToolFee(toolName: string): number {
+/** Default x402 service fee (USDC) used when a policy omits a tool fee. */
+const DEFAULT_TOOL_FEE_USDC = 0.001;
+
+export function getToolFee(toolName: string): number {
   const policy = loadPolicy();
   const fee = policy.toolFees?.[toolName];
   if (fee === undefined || fee === null) {
-    throw new Error(
-      `Tool fee not configured for ${toolName}. Please add it to policy.toolFees in the spending policy.`,
+    logger.warn(
+      { toolName, fallbackFee: DEFAULT_TOOL_FEE_USDC },
+      "Tool fee not configured; using the default x402 service fee",
     );
+    return DEFAULT_TOOL_FEE_USDC;
   }
   return fee;
 }
@@ -657,16 +661,29 @@ function getDisputesFile(recipientId?: string): string {
 }
 
 // Migrate legacy flat files to per-recipient structure (one-time)
+const LEGACY_MIGRATION_COMPLETE = Symbol.for(
+  "careguard.legacyDataMigrationComplete",
+);
+
 function migrateLegacyData() {
+  if (Reflect.get(globalThis, LEGACY_MIGRATION_COMPLETE) === true) return;
+
   const legacySpending = `${getDataDir()}/spending.json`;
   const legacyOrders = `${getDataDir()}/orders.json`;
+  const hasLegacySpending = existsSync(legacySpending);
+  const hasLegacyOrders = existsSync(legacyOrders);
+  if (!hasLegacySpending && !hasLegacyOrders) {
+    Reflect.set(globalThis, LEGACY_MIGRATION_COMPLETE, true);
+    return;
+  }
+
   const rosaDir = getRecipientDir("rosa");
   if (!existsSync(rosaDir)) mkdirSync(rosaDir, { recursive: true });
-  if (existsSync(legacySpending) && !existsSync(`${rosaDir}/spending.json`)) {
+  if (hasLegacySpending && !existsSync(`${rosaDir}/spending.json`)) {
     const data = readFileSync(legacySpending, "utf-8");
     writeFileSync(`${rosaDir}/spending.json`, data);
   }
-  if (existsSync(legacyOrders) && !existsSync(`${rosaDir}/orders.json`)) {
+  if (hasLegacyOrders && !existsSync(`${rosaDir}/orders.json`)) {
     const data = readFileSync(legacyOrders, "utf-8");
     writeFileSync(`${rosaDir}/orders.json`, data);
   }
@@ -676,6 +693,7 @@ function migrateLegacyData() {
       JSON.stringify(DEFAULT_POLICY, null, 2),
     );
   }
+  Reflect.set(globalThis, LEGACY_MIGRATION_COMPLETE, true);
 }
 migrateLegacyData();
 
@@ -3888,4 +3906,3 @@ export {
   recordDosageChange,
   getActiveDosageAtTime,
 };
-
