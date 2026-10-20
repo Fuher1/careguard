@@ -11,7 +11,9 @@ This file is auto-updated by the release workflow on each `v*` tag push.
 - **dashboard/agent:** #1238 Spending-policy changes now show an old-vs-new preview with the impact on recent payments before saving. `check_spending_policy` logic is shared through `evaluateSpendingPolicy`/`simulatePolicyImpact` in `agent/tools.ts`, exposed as `POST /agent/policy/preview`.
 
 ### Fixed
-- **agent/shared:** #1051, #1053, #1054, #1055 remove unused recipient-directory creation, default missing x402 tool fees to a warned $0.001 USDC, skip legacy migration when old flat files are absent and only migrate once per process, and periodically sweep expired in-memory cache entries (one-minute default interval).
+- **bill-audit:** #1046 unified mode now loads the standalone duplicate allowlist and per-CPT thresholds, including SIGHUP reloads; stale-rate status is included in the audit response and recommendation.
+- **agent:** #1047 removed the duplicate `fs` import from `agent/server.ts`.
+- **drug-interaction-api:** #1044 title-cases every word and hyphen-delimited part of medication names.
 - **dashboard:** #1239 Overview stat cards use a muted, dashed style with "Run a task to see…" prompts before any task has run, instead of a bare $0.00; a genuine zero after a run keeps the normal style.
 - **dashboard:** #1240 Bills empty state now explains the benefit (catching billing errors), adds an icon, and links to the audit action.
 - **dashboard/agent:** fixed parse errors on main in `medications-tab.tsx` (missing brace) and `agent/server.ts` (duplicated `runAgent` options block from a merge).
