@@ -148,6 +148,20 @@ export const billAuditOversizedRejectionsTotal = new Counter({
   registers: [registry],
 });
 
+export const pharmacyPaymentOrdersTotal = new Counter({
+  name: "pharmacy_payment_orders_total",
+  help: "Total pharmacy medication orders processed",
+  labelNames: ["status", "pharmacy"] as const,
+  registers: [registry],
+});
+
+export const pharmacyMppChargesTotal = new Counter({
+  name: "pharmacy_mpp_charges_total",
+  help: "Total pharmacy MPP charge operations",
+  labelNames: ["status"] as const,
+  registers: [registry],
+});
+
 export function metricsHandler(): RequestHandler {
   return async (req, res) => {
     const token = process.env.METRICS_TOKEN;

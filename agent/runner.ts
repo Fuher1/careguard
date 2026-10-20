@@ -309,10 +309,10 @@ export async function executeTool(
         break;
       }
       case "get_adherence_status":
-        result = getAdherenceStatus(rid);
+        result = await getAdherenceStatus(rid);
         break;
       case "confirm_adherence":
-        result = confirmAdherenceReminder(input.record_id as string);
+        result = await confirmAdherenceReminder(input.record_id as string);
         break;
       case "get_handoff_notes":
         result = getHandoffNotes(
@@ -515,7 +515,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
     if (runToolCalls + message.tool_calls.length > maxToolCallsPerRun) {
       truncated = true;
       events.push({ kind: "tool_call_cap_reached" });
-      appendAuditEntry({
+      await appendAuditEntry({
         event: "agent.tool_cap_exceeded",
         actor: "agent",
         details: { max: maxToolCallsPerRun, ran: runToolCalls },
@@ -553,7 +553,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
         toolCalls.push({ id: toolCall.id, tool: fnName, input: fnArgs, result });
       }
 
-      appendAuditEntry({
+      await appendAuditEntry({
         event: "tool_call",
         actor: "agent",
         details: {
@@ -580,7 +580,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
     truncated = true;
     events.push({ kind: "iteration_limit_reached" });
     agentIterationLimitTotal.inc();
-    appendAuditEntry({
+    await appendAuditEntry({
       event: "agent.iteration_limit_reached",
       actor: "agent",
       details: { maxIterations, toolCallCount: toolCalls.length },

@@ -2507,6 +2507,7 @@ export async function payForMedication(
       error: `BLOCKED BY ALLERGY GUARD: Patient has documented ${primaryConflict?.severity.replace("_", "-")} allergy to ${primaryConflict?.allergy.substance}. Cannot order ${drugName}.`,
       conflicts: allergyCheck.conflicts,
     };
+  }
   // Validate optional memo: Stellar MEMO_TEXT is limited to 28 bytes.
   if (memo !== undefined) {
     const memoBytes = Buffer.byteLength(memo, "utf8");
@@ -2618,39 +2619,15 @@ export async function payForMedication(
       return {
         success: false,
         error: `REQUIRES CAREGIVER APPROVAL: ${amount.toFixed(2)} exceeds the ${currentPolicy.approvalThreshold} approval threshold.`,
-        transaction,
+        transaction: tx,
       };
     }
 
-    const reason = policyCheck.reason!.includes("daily")
-      ? "daily_limit"
-      : policyCheck.reason!.includes("overall monthly limit")
-        ? "monthly_limit"
-        : "budget";
-    policyBlocksTotal.inc({ reason });
-    paymentRejectedTotal.inc({ reason });
-
-    // Surface the full budget context so the LLM can decide whether to ask
-    // the caregiver for an override or pick a cheaper option (Issue #160).
-    const dailyRemaining = policyCheck.dailyRemaining ?? 0;
-    const monthlyRemaining = policyCheck.monthlyRemaining ?? 0;
-    const budgetContext = {
-      reason,
-      attempted: amount,
-      dailyRemaining,
-      monthlyRemaining,
-      suggestion:
-        `Relay this to the caregiver: the $${amount.toFixed(2)} payment was blocked by the spending policy. ` +
-        `Remaining budget is $${dailyRemaining.toFixed(2)} today and $${monthlyRemaining.toFixed(2)} this month for ${TRANSACTION_CATEGORY.MEDICATIONS}. ` +
-        `Ask them to approve a one-time override, or choose a cheaper option that fits the remaining budget.`,
-    };
-
-    return {
-      success: false,
-      error: `BLOCKED BY SPENDING POLICY: ${policyCheck.reason}`,
-      transaction,
-      budgetContext,
-    };
+    // Reserve the budget before releasing the mutex so no other concurrent call
+    // can observe the pre-payment balance and pass a check it should fail.
+    spendingTracker.medications += amount;
+  } finally {
+    release();
   }
 
   // Execute real MPP charge payment to pharmacy (outside the mutex — can be slow)
@@ -2706,7 +2683,7 @@ export async function payForMedication(
   const reminderDate = new Date(
     Date.now() + daysSupply * 24 * 60 * 60 * 1000,
   ).toISOString();
-  appendAdherenceEntry({
+  await appendAdherenceEntry({
     recipientId: currentRecipientId,
     reminderDate,
     drug: drugName,
@@ -3006,18 +2983,14 @@ export async function payBill(
       return {
         success: false,
         error: `REQUIRES CAREGIVER APPROVAL: ${amount.toFixed(2)} exceeds the ${currentPolicy.approvalThreshold} approval threshold.`,
-        transaction,
+        transaction: tx,
       };
     }
 
-    policyBlocksTotal.inc({
-      reason: policyCheck.reason!.includes("daily") ? "daily_limit" : "budget",
-    });
-    return {
-      success: false,
-      error: `BLOCKED BY SPENDING POLICY: ${policyCheck.reason}`,
-      transaction,
-    };
+    // Reserve the budget before releasing the mutex.
+    spendingTracker.bills += amount;
+  } finally {
+    releaseBill();
   }
 
   // Execute real Stellar USDC transfer (serialised per-keypair to avoid sequence races — Issue #XXX)
@@ -3267,7 +3240,7 @@ interface AdherenceEntry {
   skippedCount: number;
   flagged: boolean;
 }
-function appendAdherenceEntry(
+async function appendAdherenceEntry(
   entry: Omit<
     AdherenceEntry,
     "responded" | "taken" | "skippedCount" | "flagged"
@@ -3280,9 +3253,13 @@ function appendAdherenceEntry(
     skippedCount: 0,
     flagged: false,
   };
-  writeFileSync(ADHERENCE_FILE, JSON.stringify(fullEntry) + "\n", {
-    flag: "a",
-  });
+  try {
+    await fsPromises.appendFile(ADHERENCE_FILE, JSON.stringify(fullEntry) + "\n");
+  } catch {
+    try {
+      appendFileSync(ADHERENCE_FILE, JSON.stringify(fullEntry) + "\n");
+    } catch {}
+  }
 }
 
 export interface DisputeRecord {
@@ -3387,10 +3364,10 @@ export function generateDisputeLetter(
 }
 
 // --- Tool: Adherence status (Issue #264) ---
-export function getAdherenceStatus(recipientId: string = "rosa") {
-  const summary = getAdherenceSummary(recipientId);
-  const pending = getPendingAdherences(recipientId);
-  const flagged = getFlaggedAdherences(recipientId);
+export async function getAdherenceStatus(recipientId: string = "rosa") {
+  const summary = await getAdherenceSummary(recipientId);
+  const pending = await getPendingAdherences(recipientId);
+  const flagged = await getFlaggedAdherences(recipientId);
   return {
     ...summary,
     pendingReminders: pending.length,
@@ -3398,8 +3375,8 @@ export function getAdherenceStatus(recipientId: string = "rosa") {
   };
 }
 
-export function confirmAdherenceReminder(recordId: string) {
-  return { success: confirmAdherence(recordId) };
+export async function confirmAdherenceReminder(recordId: string) {
+  return { success: await confirmAdherence(recordId) };
 }
 
 const recipientIdSchema = z.string().min(1).optional();
@@ -3640,6 +3617,7 @@ export const TOOL_DEFINITIONS = [
     }),
   },
   {
+    name: "pay_for_medication",
     description: `Pay a pharmacy for a medication order via MPP Charge on Stellar (real USDC payment). Subject to spending policy limits. Amount must be between $0.01 and $${MAX_PAYMENT}. If the payment is blocked by spending policy, the result includes a budgetContext object { reason, attempted, dailyRemaining, monthlyRemaining, suggestion }: relay it to the caregiver so they can either approve a one-time override or pick a cheaper option within the remaining budget. Optionally supports splitting costs across contributing caregivers.`,
     input_schema: strictInputSchema({
       type: "object" as const,

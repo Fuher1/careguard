@@ -83,6 +83,7 @@ export interface SideEffectEntry {
   timestamp: string;
 }
 
+export type CareRecipientEntity = CareRecipientRecord;
 export type CareRecipientInput = Omit<CareRecipientEntity, 'id'>;
 
 interface CareRecipientRow {
@@ -403,14 +404,6 @@ export class CareRecipientsStore {
     return this.getById(id)!;
   }
 
-  listSideEffectEntries(recipientId: string, medicationId?: string): SideEffectEntry[] {
-    const sql = medicationId
-      ? 'SELECT * FROM side_effect_entries WHERE recipient_id = ? AND medication_id = ? ORDER BY timestamp DESC'
-      : 'SELECT * FROM side_effect_entries WHERE recipient_id = ? ORDER BY timestamp DESC';
-    const params = medicationId ? [recipientId, medicationId] : [recipientId];
-    return this.db.prepare(sql).all(...params) as SideEffectEntry[];
-  }
-
   // ── Caregiver links (#1179) ─────────────────────────────────────────────────
 
   /** Active caregivers and pending invites for a recipient, oldest first. */
@@ -584,6 +577,64 @@ export class CareRecipientsStore {
     ends_at: string;
   }): ApprovalDelegation {
     const id = `dlg_${randomUUID()}`;
+    this.db.prepare(`
+      INSERT INTO approval_delegations (id, recipient_id, delegator, delegate, starts_at, ends_at, revoked_at, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, NULL, ?)
+    `).run(id, input.recipient_id, input.delegator, input.delegate, input.starts_at, input.ends_at, new Date().toISOString());
+    return this.getDelegation(id)!;
+  }
+
+  getDelegation(id: string): ApprovalDelegation | undefined {
+    return this.db.prepare('SELECT * FROM approval_delegations WHERE id = ?').get(id) as ApprovalDelegation | undefined;
+  }
+
+  listDelegations(recipientId: string): ApprovalDelegation[] {
+    return this.db
+      .prepare('SELECT * FROM approval_delegations WHERE recipient_id = ? ORDER BY starts_at DESC')
+      .all(recipientId) as ApprovalDelegation[];
+  }
+
+  /** The delegation letting `delegate` act for `delegator` on this recipient right now, if any. */
+  findActiveDelegation(recipientId: string, delegator: string, delegate: string, now: Date = new Date()): ApprovalDelegation | undefined {
+    const iso = now.toISOString();
+    return this.db.prepare(`
+      SELECT * FROM approval_delegations
+      WHERE recipient_id = ? AND delegator = ? AND delegate = ?
+        AND revoked_at IS NULL AND starts_at <= ? AND ends_at > ?
+      ORDER BY ends_at DESC LIMIT 1
+    `).get(recipientId, delegator, delegate, iso, iso) as ApprovalDelegation | undefined;
+  }
+
+  /** Active delegations held by `delegate` on this recipient (for the approvals banner). */
+  listActiveDelegationsFor(recipientId: string, delegate: string, now: Date = new Date()): ApprovalDelegation[] {
+    const iso = now.toISOString();
+    return this.db.prepare(`
+      SELECT * FROM approval_delegations
+      WHERE recipient_id = ? AND delegate = ?
+        AND revoked_at IS NULL AND starts_at <= ? AND ends_at > ?
+      ORDER BY ends_at ASC
+    `).all(recipientId, delegate, iso, iso) as ApprovalDelegation[];
+  }
+
+  /** Revoke early. Only the delegator may revoke; returns the updated row or undefined if not theirs/already ended. */
+  revokeDelegation(id: string, delegator: string, now: Date = new Date()): ApprovalDelegation | undefined {
+    const result = this.db.prepare(`
+      UPDATE approval_delegations SET revoked_at = ?
+      WHERE id = ? AND delegator = ? AND revoked_at IS NULL AND ends_at > ?
+    `).run(now.toISOString(), id, delegator, now.toISOString());
+    return result.changes > 0 ? this.getDelegation(id) : undefined;
+  }
+
+  // ── Side effects ─────────────────────────────────────────────────────────
+
+  listSideEffectEntries(recipientId: string, medicationId?: string): SideEffectEntry[] {
+    const sql = medicationId
+      ? 'SELECT * FROM side_effect_entries WHERE recipient_id = ? AND medication_id = ? ORDER BY timestamp DESC'
+      : 'SELECT * FROM side_effect_entries WHERE recipient_id = ? ORDER BY timestamp DESC';
+    const params = medicationId ? [recipientId, medicationId] : [recipientId];
+    return this.db.prepare(sql).all(...params) as SideEffectEntry[];
+  }
+
   addSideEffectEntry(entry: Omit<SideEffectEntry, 'id'>): SideEffectEntry {
     const id = `${entry.recipient_id}-${entry.medication_id}-${Date.now()}`;
     this.db.prepare(`

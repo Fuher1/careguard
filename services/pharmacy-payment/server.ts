@@ -27,6 +27,13 @@ import {
   MedicationOrderSchema,
   type MedicationOrderInput,
 } from "./validation.ts";
+import {
+  metricsHandler,
+  pharmacyPaymentOrdersTotal,
+  pharmacyMppChargesTotal,
+  paymentsUsdcTotal,
+  stellarTxSubmittedTotal,
+} from "../../shared/metrics.ts";
 
 const PORT = parseInt(process.env.PHARMACY_PAYMENT_PORT || "3005", 10);
 const RECIPIENT = process.env.PHARMACY_1_PUBLIC_KEY;
@@ -126,6 +133,9 @@ app.get("/pharmacy/orders", (_req, res) => {
   res.json({ orders: loadOrders() });
 });
 
+// GET /metrics endpoint for Prometheus instrumentation (Issue #1015)
+app.get("/metrics", metricsHandler());
+
 // MPP charge server
 const mppx = Mppx.create({
   secretKey: MPP_SECRET_KEY,
@@ -143,6 +153,7 @@ const mppx = Mppx.create({
 app.post("/pharmacy/order", async (req, res) => {
   const parsedOrder = MedicationOrderSchema.safeParse(req.body);
   if (!parsedOrder.success) {
+    pharmacyPaymentOrdersTotal.inc({ status: "invalid_request", pharmacy: "unknown" });
     res.status(400).json({
       error: "Invalid order request",
       details: parsedOrder.error.issues.map((issue) => issue.message),
@@ -182,6 +193,8 @@ app.post("/pharmacy/order", async (req, res) => {
       description: `Medication: ${safeDrug} from ${safePharmacy}`,
     })(webReq);
   } catch (err: any) {
+    pharmacyMppChargesTotal.inc({ status: "failed" });
+    pharmacyPaymentOrdersTotal.inc({ status: "failed", pharmacy: safePharmacy });
     logger.error({ err: err?.message }, "MPP charge flow failed — facilitator unavailable");
     res.status(503).json({ error: "Payment facilitator unavailable, try again shortly" });
     return;
@@ -189,6 +202,7 @@ app.post("/pharmacy/order", async (req, res) => {
 
   // 402 = client needs to sign and pay
   if (result.status === 402) {
+    pharmacyMppChargesTotal.inc({ status: "challenge" });
     const challenge = result.challenge;
     challenge.headers.forEach((value: string, key: string) => res.setHeader(key, value));
     const body = await challenge.text();
@@ -208,6 +222,12 @@ app.post("/pharmacy/order", async (req, res) => {
     protocol: "MPP Charge",
   };
   await saveOrder(newOrder);
+
+  // Record Prometheus metrics for successful order and payment
+  pharmacyMppChargesTotal.inc({ status: "success" });
+  pharmacyPaymentOrdersTotal.inc({ status: "confirmed", pharmacy: safePharmacy });
+  paymentsUsdcTotal.inc({ type: "medication" });
+  stellarTxSubmittedTotal.inc({ result: "success" });
 
   // Return response with payment receipt headers
   const response = result.withReceipt(
