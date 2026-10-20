@@ -251,6 +251,87 @@ const NETWORK = (
   env.data.STELLAR_NETWORK === "public" ? "stellar:public" : "stellar:testnet"
 ) as `${string}:${string}`;
 
+interface DuplicateAllowlistEntry {
+  code: string;
+}
+
+interface AuditThresholdConfig {
+  default: number;
+  byCpt: Record<string, number>;
+}
+
+const DEFAULT_DUPLICATE_ALLOWLIST = new Set(["96372", "97110"]);
+let duplicateAllowlist = new Set(DEFAULT_DUPLICATE_ALLOWLIST);
+let auditThresholds: AuditThresholdConfig = {
+  default: env.data.BILL_AUDIT_OVERCHARGE_MULTIPLIER,
+  byCpt: {},
+};
+
+function loadBillAuditConfig() {
+  try {
+    const allowlistPath = fileURLToPath(
+      new URL(
+        "./services/bill-audit-api/duplicates-allowlist.json",
+        import.meta.url,
+      ),
+    );
+    const entries = JSON.parse(
+      readFileSync(allowlistPath, "utf-8"),
+    ) as DuplicateAllowlistEntry[];
+    duplicateAllowlist = new Set(entries.map((entry) => entry.code));
+    logger.info(
+      { count: duplicateAllowlist.size },
+      "Loaded bill-audit duplicate allowlist",
+    );
+  } catch (error) {
+    logger.error({ error }, "Failed to load bill-audit duplicate allowlist");
+    duplicateAllowlist = new Set(DEFAULT_DUPLICATE_ALLOWLIST);
+  }
+
+  try {
+    const thresholdsPath = fileURLToPath(
+      new URL(
+        "./services/bill-audit-api/audit_thresholds.json",
+        import.meta.url,
+      ),
+    );
+    const thresholds = JSON.parse(
+      readFileSync(thresholdsPath, "utf-8"),
+    ) as AuditThresholdConfig;
+    if (process.env.BILL_AUDIT_OVERCHARGE_MULTIPLIER) {
+      thresholds.default = env.data.BILL_AUDIT_OVERCHARGE_MULTIPLIER;
+    }
+    auditThresholds = thresholds;
+    logger.info(
+      {
+        default: thresholds.default,
+        cptCount: Object.keys(thresholds.byCpt).length,
+      },
+      "Loaded bill-audit thresholds",
+    );
+  } catch (error) {
+    logger.error({ error }, "Failed to load bill-audit thresholds");
+    auditThresholds = {
+      default: env.data.BILL_AUDIT_OVERCHARGE_MULTIPLIER,
+      byCpt: {},
+    };
+  }
+}
+
+function getAuditThreshold(cptCode: string): number {
+  return (
+    auditThresholds.byCpt[cptCode] ??
+    auditThresholds.default ??
+    env.data.BILL_AUDIT_OVERCHARGE_MULTIPLIER
+  );
+}
+
+loadBillAuditConfig();
+process.on("SIGHUP", () => {
+  logger.info("SIGHUP received, reloading bill-audit configuration");
+  loadBillAuditConfig();
+});
+
 const llm = new OpenAI({ apiKey: env.data.LLM_API_KEY, baseURL: LLM_BASE_URL });
 const agentKeypair = Keypair.fromSecret(env.data.AGENT_SECRET_KEY);
 
@@ -259,7 +340,6 @@ const MAX_TOOL_CALLS_PER_RUN = parseInt(
   process.env.MAX_TOOL_CALLS_PER_RUN || "30",
   10,
 );
-let toolCallCapHitsTotal = 0;
 
 // --- Per-run iteration cap (default 15) ---
 const MAX_AGENT_ITERATIONS = Math.max(
@@ -884,6 +964,11 @@ app.post(
       const auditResult = auditBill(sanitizedLineItems, {
         network: NETWORK,
         payTo: process.env.BILL_PROVIDER_PUBLIC_KEY,
+        duplicateAllowlist,
+        getAuditThreshold,
+        overchargeMultiplier: env.data.BILL_AUDIT_OVERCHARGE_MULTIPLIER,
+        suggestedMultiplier: env.data.BILL_AUDIT_SUGGESTED_MULTIPLIER,
+        upcodedMultiplier: env.data.BILL_AUDIT_UPCODED_MULTIPLIER,
         providerHistoryLookup,
       });
 

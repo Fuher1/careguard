@@ -30,6 +30,12 @@ export const agentToolCallsTotal = new Counter({
   registers: [registry],
 });
 
+export const agentToolCallCapExceededTotal = new Counter({
+  name: "agent_tool_call_cap_exceeded_total",
+  help: "Total agent runs that exceeded the tool call cap",
+  registers: [registry],
+});
+
 export const paymentsUsdcTotal = new Counter({
   name: "payments_usdc_total",
   help: "Total USDC payments made",
