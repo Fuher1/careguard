@@ -15,21 +15,6 @@
 
 import { z } from "zod";
 
-// ── Dosage History (Issue #1227) ─────────────────────────────────────────────
-
-export const DosageHistoryEntrySchema = z.object({
-  id: z.string().min(1),
-  previousDosage: z.string().min(1),
-  previousFrequency: z.string().min(1),
-  newDosage: z.string().min(1),
-  newFrequency: z.string().min(1),
-  changedAt: z.string().min(1),
-  reason: z.string().optional(),
-  prescriber: z.string().optional(),
-});
-
-export type DosageHistoryEntry = z.infer<typeof DosageHistoryEntrySchema>;
-
 // ── Medication ────────────────────────────────────────────────────────────────
 
 export const MedicationSchema = z.object({
@@ -46,7 +31,119 @@ export type Medication = z.infer<typeof MedicationSchema>;
 
 // ── PharmacyPrice ─────────────────────────────────────────────────────────────
 
-export type SeverityThreshold = 'any' | 'major' | 'moderate' | 'mild';
+export const PharmacyPriceSchema = z.object({
+  pharmacyName: z.string().min(1),
+  pharmacyId: z.string().min(1),
+  price: z.number().nonnegative(),
+  distance: z.string().optional(),
+  inStock: z.union([z.boolean(), z.literal("unknown")]),
+});
+
+export type PharmacyPrice = z.infer<typeof PharmacyPriceSchema>;
+
+// ── PriceComparisonResult ─────────────────────────────────────────────────────
+
+export const PriceComparisonResultSchema = z.object({
+  drug: z.string().min(1),
+  dosage: z.string(),
+  zipCode: z.string(),
+  prices: z.array(PharmacyPriceSchema),
+  cheapest: PharmacyPriceSchema,
+  mostExpensive: PharmacyPriceSchema,
+  potentialSavings: z.number().nonnegative(),
+});
+
+export type PriceComparisonResult = z.infer<typeof PriceComparisonResultSchema>;
+
+// ── BillLineItem ──────────────────────────────────────────────────────────────
+
+export const BillLineItemSchema = z.object({
+  description: z.string().min(1),
+  cptCode: z.string().optional(),
+  chargedAmount: z.number().nonnegative(),
+  fairMarketRate: z.number().nonnegative().optional(),
+  status: z.enum(["valid", "duplicate", "upcoded", "unbundled", "error"]),
+  errorDescription: z.string().optional(),
+  suggestedAmount: z.number().nonnegative().optional(),
+});
+
+export type BillLineItem = z.infer<typeof BillLineItemSchema>;
+
+// ── BillAuditResult ───────────────────────────────────────────────────────────
+
+export const BillAuditResultSchema = z.object({
+  totalCharged: z.number().nonnegative(),
+  totalCorrect: z.number().nonnegative(),
+  totalOvercharge: z.number().nonnegative(),
+  errorCount: z.number().int().nonnegative(),
+  lineItems: z.array(BillLineItemSchema),
+  recommendation: z.string(),
+});
+
+export type BillAuditResult = z.infer<typeof BillAuditResultSchema>;
+
+// ── SpendingPolicy ────────────────────────────────────────────────────────────
+
+export const SpendingPolicySchema = z.object({
+  dailyLimit: z.number().positive(),
+  monthlyLimit: z.number().positive(),
+  medicationMonthlyBudget: z.number().nonnegative(),
+  billMonthlyBudget: z.number().nonnegative(),
+  approvalThreshold: z.number().nonnegative(),
+  holdTimeSeconds: z.number().int().nonnegative(),
+  /**
+   * IANA timezone string for the caregiver's local day (Issue #207).
+   * Example: "America/Phoenix", "America/New_York", "Europe/London".
+   * When set, daily-limit checks use this timezone to determine "today"
+   * rather than UTC or the global SPENDING_TIMEZONE env var.
+   * Defaults to the SPENDING_TIMEZONE env var if omitted.
+   */
+  timezone: z.string().optional(),
+  toolFees: z.record(z.string(), z.number()).optional(),
+  notifications: z
+    .object({
+      email: z.boolean(),
+      sms: z.boolean(),
+      emailAddress: z.string().optional(),
+      phoneNumber: z.string().optional(),
+    })
+    .optional(),
+  /**
+   * Soft-warning threshold as a percentage (0–99) of each budget.
+   * When spending crosses this fraction of a budget limit the agent fires a
+   * warning notification but does NOT block the transaction.
+   * Distinct from `approvalThreshold` (hard dollar gate) and from the hard
+   * block limits (dailyLimit, monthlyLimit, category budgets).
+   * Example: 80 → warn when spend reaches 80% of a budget.
+   * Defaults to DEFAULT_WARNING_THRESHOLD_PCT (80) when not set by the caregiver.
+   */
+  warningThresholdPct: z.number().int().min(1).max(99).optional(),
+});
+
+export type SpendingPolicy = z.infer<typeof SpendingPolicySchema>;
+
+// ── Allergies & Adverse Reactions (Issue #1230) ────────────────────────────────
+
+export const AllergySeveritySchema = z.enum([
+  'mild',
+  'moderate',
+  'severe',
+  'life_threatening',
+]);
+
+export type AllergySeverity = z.infer<typeof AllergySeveritySchema>;
+
+export const RecipientAllergySchema = z.object({
+  id: z.string().min(1),
+  substance: z.string().min(1),
+  severity: AllergySeveritySchema,
+  reaction: z.string().optional(),
+  notes: z.string().optional(),
+  createdAt: z.string().min(1),
+  updatedAt: z.string().optional(),
+});
+
+export type RecipientAllergy = z.infer<typeof RecipientAllergySchema>;
 
 export interface SideEffectEntry {
   id: string;

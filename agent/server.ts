@@ -10,6 +10,8 @@
 
 import "dotenv/config";
 import { createHash } from "crypto";
+import { resolve } from "path";
+import { fileURLToPath } from "url";
 import {
   existsSync,
   mkdirSync,
@@ -54,8 +56,7 @@ import {
   SpendingPolicySchema,
   previewSpendingPolicy,
   getDataDir,
-  payForMedication,
-  payBill,
+  approvePendingTransaction,
 } from "./tools.ts";
 import { getAdherenceTimeline, getPendingAdherences, skipAdherence } from "../shared/adherence.ts";
 import { createVitalsStore } from "../services/vitals/db.ts";
@@ -252,16 +253,19 @@ app.use(rateLimiters.default);
 
 applySecurityMiddleware(app);
 app.use(createCorsMiddleware());
-app.use(express.json({ limit: process.env.JSON_BODY_LIMIT ?? "20kb" }));
+app.use(
+  express.json({
+    limit: process.env.JSON_BODY_LIMIT ?? "20kb",
+    type: (req) =>
+      req.path !== "/webhooks/stellar/deposit" &&
+      Boolean(req.is("application/json")),
+  }),
+);
 app.use(requestLifecycleMiddleware());
 app.get("/metrics", metricsHandler());
 
 // Per-run tool call cap
-const MAX_TOOL_CALLS_PER_RUN = parseInt(
-  process.env.MAX_TOOL_CALLS_PER_RUN || "30",
-  10,
-);
-let toolCallCapHitsTotal = 0;
+const MAX_TOOL_CALLS_PER_RUN = parseInt(process.env.MAX_TOOL_CALLS_PER_RUN || "30", 10);
 
 // ── Persisted agent-pause state (Issue #17) ──────────────────────────────────
 // Persists to data/agent-state.json so a paused agent stays paused across
@@ -347,64 +351,35 @@ app.post("/agent/approvals/:txId", async (req, res) => {
     (req.body.recipient_id as string) ||
     "rosa";
   setCurrentRecipient(recipientId);
+
+  // Validate the transaction exists and is still pending before acting.
   const tracker = getSpendingTracker();
-  const txIndex = tracker.transactions.findIndex((t: any) => t.id === txId);
-  if (txIndex === -1)
-    return res.status(404).json({ error: "Transaction not found" });
-  const tx = tracker.transactions[txIndex];
+  const tx = tracker.transactions.find((t: any) => t.id === txId);
+  if (!tx) return res.status(404).json({ error: "Transaction not found" });
   if (tx.status !== "pending")
     return res.status(400).json({ error: "Transaction is not pending" });
 
   if (!approve) {
     (tx as any).status = "rejected";
+    tracker.transactions = tracker.transactions.map((t: any) =>
+      t.id === txId ? tx : t,
+    );
     saveSpending(tracker);
-    recordDecision("rejected");
-    return res.json({ success: true, status: "rejected", delegated: authz.delegated });
+    return res.json({ success: true, status: "rejected" });
   }
 
   try {
-    let result: any;
-    if (tx.category === "medications") {
-      const match = tx.description.match(/(.+) from (.+)/);
-      if (!match) throw new Error("Cannot parse transaction description");
-      const [, drugName, pharmacyName] = match;
-      const pharmacyId = tx.recipient;
-      result = await payForMedication(
-        pharmacyId,
-        pharmacyName,
-        drugName,
-        tx.amount,
-        true,
-      );
-    } else if (tx.category === "bills") {
-      const match = tx.description.match(/(.+) — (.+)/);
-      if (!match) throw new Error("Cannot parse transaction description");
-      const [, description, providerName] = match;
-      const providerId = tx.recipient;
-      result = await payBill(
-        providerId,
-        providerName,
-        description,
-        tx.amount,
-        true,
-      );
-    } else {
-      throw new Error("Unknown transaction category");
-    }
-
+    // Delegate to the unified approvePendingTransaction path so the HTTP route
+    // and the background scanner share audit logging, budget bookkeeping, and
+    // status transitions (#1029).
+    const result = await approvePendingTransaction(txId);
     if (result.success) {
-      tx.status = "completed";
-      tx.stellarTxHash = result.transaction?.stellarTxHash;
-      tracker.transactions[txIndex] = tx;
-      saveSpending(tracker);
       return res.json({
         success: true,
         status: "completed",
         transaction: result.transaction,
       });
     } else {
-      (tx as any).status = "rejected";
-      saveSpending(tracker);
       return res
         .status(400)
         .json({ success: false, error: result.error, status: "rejected" });
@@ -421,8 +396,8 @@ app.get("/", (_req, res) => {
     network: `stellar:${STELLAR_CONFIG.networkType}`,
     llm: `${LLM_BASE_URL} / ${LLM_MODEL}`,
     agentWallet: agentKeypair.publicKey(),
-    recipients: ["rosa"],
-    caregiver: "Maria Garcia",
+    recipients: Object.keys(recipientProfiles),
+    caregiver: caregiverProfile.name,
     paused: agentPaused,
   });
 });
@@ -692,9 +667,6 @@ app.put("/agent/recipients/:recipientId", (req, res) => {
     recipientProfiles[recipientId].medications = medications;
   if (doctor) recipientProfiles[recipientId].doctor = doctor;
   if (insurance) recipientProfiles[recipientId].insurance = insurance;
-  const dir = new URL(`../data/recipients/${recipientId}`, import.meta.url)
-    .pathname;
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   res.json({ success: true, recipient: recipientProfiles[recipientId] });
 });
 
@@ -774,6 +746,8 @@ app.post("/agent/adherence/skip", async (req, res) => {
 app.use("/agent", createVitalsRouter(createVitalsStore()));
 // #1193: searchable history of past drug interaction checks.
 app.use("/agent", createInteractionChecksRouter(getInteractionCheckStore()));
+// Searchable transcript of agent tool invocations and their outcomes.
+app.use("/agent", createAgentHistoryRouter(getAgentHistoryStore()));
 
 // --- Dispute letter endpoint (#266) ---
 app.post("/agent/dispute-letter", (req, res) => {
@@ -1015,9 +989,24 @@ app.post(
   express.raw({ type: "application/json" }),
   verifyWebhook(),
   (req: express.Request, res: express.Response) => {
-    const payload = JSON.parse(
-      Buffer.isBuffer(req.body) ? req.body.toString("utf8") : String(req.body),
-    ) as Record<string, unknown>;
+    const rawBody = Buffer.isBuffer(req.body)
+      ? req.body.toString("utf8")
+      : String(req.body);
+    let payload: Record<string, unknown>;
+    try {
+      payload = JSON.parse(rawBody) as Record<string, unknown>;
+    } catch (err) {
+      logger.warn(
+        {
+          err,
+          webhookId: req.headers["x-webhook-id"],
+          bodyLength: rawBody.length,
+        },
+        "invalid JSON in stellar deposit webhook",
+      );
+      res.status(400).json({ error: "Invalid JSON in webhook payload" });
+      return;
+    }
     logger.info({ payload }, "stellar deposit webhook received");
     res.status(200).json({ status: "received" });
   },

@@ -36,7 +36,25 @@ export function getAgentRunId(): string | undefined {
   return als.getStore()?.agentRunId;
 }
 
+// Exact-match paths and prefix segments for routes added since the original set.
+// Prefix segments cover parameterised routes like /agent/approvals/:txId.
 const SENSITIVE_PATHS = new Set(["/agent/run", "/bill/audit", "/pharmacy/order"]);
+const SENSITIVE_PREFIXES = [
+  "/agent/approvals/",
+  "/agent/dispute-letter",
+  "/agent/policy",
+  "/webhooks/stellar/deposit",
+];
+
+function isSensitivePath(path: string): boolean {
+  if (SENSITIVE_PATHS.has(path)) return true;
+  for (const prefix of SENSITIVE_PREFIXES) {
+    if (path === prefix || path.startsWith(prefix + "/") || path.startsWith(prefix + "?")) return true;
+    // exact prefix match (e.g. /agent/dispute-letter with no trailing slash)
+    if (path === prefix.replace(/\/$/, "")) return true;
+  }
+  return false;
+}
 
 export function requestLifecycleMiddleware(): RequestHandler {
   return (req, res, next) => {
@@ -61,7 +79,7 @@ export function requestLifecycleMiddleware(): RequestHandler {
 
       if (status >= 500) {
         log.error(data, "http");
-      } else if (status >= 400 && SENSITIVE_PATHS.has(path)) {
+      } else if (status >= 400 && isSensitivePath(path)) {
         log.warn(data, "http");
       } else {
         log.info(data, "http");

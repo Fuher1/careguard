@@ -18,17 +18,14 @@ import { HandoffNotesTab } from "../components/tabs/handoff-notes-tab";
 import { PolicyTab } from "../components/tabs/policy-tab";
 import { SettingsTab } from "../components/tabs/settings-tab";
 import { WalletTab } from "../components/tabs/wallet-tab";
+import { HouseholdTab } from "../components/tabs/household-tab";
 import { DASHBOARD_TABS, type Tab } from "../components/types";
 import { useAgentState } from "../hooks/use-agent-state";
 import { useProfile } from "../lib/useProfile";
-import { useRecipients } from "../lib/use-recipients";
+import { useRecipients } from "../lib/useRecipients";
+import type { RecipientListItem } from "../lib/useRecipients";
 import { ConfigErrorPage } from "../components/config-error-page";
 import { AGENT_URL } from "../lib/agent-url";
-
-
-import { DEFAULT_LOCALE } from "../i18n";
-import { caregiverFetch } from "../lib/caregiver-fetch";
-import { DEFAULT_CONSENT_SETTINGS, type ConsentSettings } from "../lib/types";
 
 export default function Dashboard() {
   // In production, AGENT_URL is null when NEXT_PUBLIC_API_URL is unset.
@@ -39,12 +36,13 @@ export default function Dashboard() {
   }
 
   const { recipient, caregiver, updateProfile } = useProfile();
-  const { recipients, selectedId, selectRecipient, error: recipientsError } = useRecipients((profile) => {
-    updateProfile({ recipient: profile });
-  });
+  const { recipients, selectedId, selectRecipient } = useRecipients(
+    (profile) => {
+      updateProfile({ recipient: profile });
+    },
+  );
   const pathname = usePathname();
   const searchParams = useSearchParams();
-
 
   const recipientInitials = recipient.name
     .split(" ")
@@ -107,12 +105,10 @@ export default function Dashboard() {
         onResume={state.togglePause}
       />
       {state.agentResult?.truncated && (
-        <div
-          role="alert"
-          className="mx-auto max-w-7xl px-4 pt-4"
-        >
+        <div role="alert" className="mx-auto max-w-7xl px-4 pt-4">
           <div className="bg-yellow-50 border border-yellow-300 rounded-xl p-4 text-sm text-yellow-800">
-            The last agent task was truncated — the result may be incomplete. Try running the task again from Overview.
+            The last agent task was truncated — the result may be incomplete.
+            Consider re-running with a more focused request.
           </div>
         </div>
       )}
@@ -158,13 +154,7 @@ export default function Dashboard() {
           />
         )}
         {activeTab === "bills" && (
-          <BillsTab
-            agentResult={state.agentResult}
-            recipient={recipient}
-            locale={locale}
-            currentCaregiver={caregiver}
-            consentSettings={consentSettings}
-          />
+          <BillsTab agentResult={state.agentResult} recipient={recipient} />
         )}
         {activeTab === "approvals" && (
           <ApprovalsTab
@@ -244,6 +234,13 @@ export default function Dashboard() {
             agentPaused={state.agentPaused}
             onTogglePause={state.togglePause}
             onUpdateProfile={updateProfile}
+            recipients={recipients}
+            selectedRecipientId={selectedId}
+            onSelectRecipient={selectRecipient}
+          />
+        )}
+        {activeTab === "household" && (
+          <HouseholdTab
             recipients={recipients}
             selectedRecipientId={selectedId}
             onSelectRecipient={selectRecipient}
