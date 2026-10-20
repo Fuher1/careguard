@@ -340,7 +340,6 @@ const MAX_TOOL_CALLS_PER_RUN = parseInt(
   process.env.MAX_TOOL_CALLS_PER_RUN || "30",
   10,
 );
-let toolCallCapHitsTotal = 0;
 
 // --- Per-run iteration cap (default 15) ---
 const MAX_AGENT_ITERATIONS = Math.max(
