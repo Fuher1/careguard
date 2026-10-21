@@ -33,6 +33,7 @@ import { applySecurityMiddleware } from "./shared/security-middleware.ts";
 import { createApiDocsRouter } from "./shared/api-docs.ts";
 import { logger } from "./shared/logger.ts";
 import { requireApiKey } from "./shared/auth.ts";
+import { createPharmacyAdminAuth } from "./shared/pharmacy-admin-auth.ts";
 import {
   validateTask,
   getSuspiciousTaskCount,
@@ -1212,22 +1213,22 @@ const _piiScrub = process.env.LLM_PII_SCRUB !== "false";
 app.get("/agent/status", (_req, res) => {
   res.json(getAgentState());
 });
-app.post("/agent/pause", (req, res) => {
+app.post("/agent/pause", async (req, res) => {
   const raw = req.body?.reason;
   const reason: PauseReason =
     raw === "low-balance-usdc" || raw === "low-balance-xlm" ? raw : "manual";
   const state = pauseAgent(reason);
-  appendAuditEntry({
+  await appendAuditEntry({
     event: "agent.paused",
     actor: "api",
     details: { reason },
   });
   res.json(state);
 });
-app.post("/agent/resume", (_req, res) => {
+app.post("/agent/resume", async (_req, res) => {
   const prev = getAgentState();
   const state = resumeAgent();
-  appendAuditEntry({
+  await appendAuditEntry({
     event: "agent.resumed",
     actor: "api",
     details: { previousReason: prev.pausedReason },
@@ -1246,7 +1247,7 @@ app.get("/agent/transactions", (req, res) => {
   );
   res.json({ ...tracker, transactions, pagination });
 });
-app.post("/agent/policy", (req, res) => {
+app.post("/agent/policy", async (req, res) => {
   const result = SpendingPolicySchema.safeParse(req.body);
   if (!result.success) {
     return res
@@ -1254,7 +1255,7 @@ app.post("/agent/policy", (req, res) => {
       .json({ error: "Invalid policy", issues: result.error.issues });
   }
   setSpendingPolicy(result.data);
-  appendAuditEntry({
+  await appendAuditEntry({
     event: "agent.policy_updated",
     actor: "api",
     details: {
@@ -1298,9 +1299,9 @@ app.post("/agent/policy/preview", (req, res) => {
   }
   res.json({ impact: previewSpendingPolicy(result.data) });
 });
-app.post("/agent/reset", (req, res) => {
+app.post("/agent/reset", async (req, res) => {
   resetSpendingTracker();
-  appendAuditEntry({
+  await appendAuditEntry({
     event: "agent.reset",
     actor: "api",
     details: {

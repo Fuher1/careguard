@@ -130,17 +130,6 @@ export function authenticateCaregiver(store: CareRecipientsStore, caregiverToken
 }
 
 /**
- * Care recipients CRUD & GDPR Data Export routes (Issue #1225).
- */
-export function createCareRecipientsRouter(store: CareRecipientsStore, caregiverToken: string): Router {
-  const router = Router();
-  const auth = requireCaregiverToken(caregiverToken);
-  const exportRateLimiter = createRateLimiter(
-    "recipient-export",
-    10,
-    15 * 60 * 1000,
-    { error: "Too many export requests, please try again later." },
-  );
  * Gates /recipients/:id/... by role. A caregiver who is not linked to the
  * recipient gets 404 rather than 403, so recipient ids are not disclosed.
  */
@@ -228,6 +217,12 @@ export function createCareRecipientsRouter(store: CareRecipientsStore, caregiver
   const canView = requirePermission(store, "view");
   const canAct = requirePermission(store, "act");
   const canManage = requirePermission(store, "manage");
+  const exportRateLimiter = createRateLimiter(
+    "recipient-export",
+    10,
+    15 * 60 * 1000,
+    { error: "Too many export requests, please try again later." },
+  );
 
   router.get("/recipients", auth, (_req, res) => {
     const principal = principalOf(res);
@@ -408,7 +403,7 @@ export function createCareRecipientsRouter(store: CareRecipientsStore, caregiver
     }));
 
     // 7. Adherence Records
-    const adherenceList = readAdherenceRecords()
+    const adherenceList = (await readAdherenceRecords())
       .filter((r) => r.recipientId === cleanId)
       .map((r) => ({
         drug: r.drug,

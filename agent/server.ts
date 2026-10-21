@@ -18,6 +18,7 @@ import {
   readFileSync,
   writeFileSync,
   renameSync,
+  promises as fsPromises,
 } from "fs";
 import express, { type Express } from "express";
 import OpenAI from "openai";
@@ -38,10 +39,9 @@ import {
 import { startOrderStatusReminderCron } from "../shared/order-status-reminder.ts";
 import { rateLimiters } from "../shared/rate-limit.ts";
 import { agentQueue } from "../shared/agent-queue.ts";
-import { requestContextMiddleware } from "../shared/request-context.ts";
-import { requestLoggerMiddleware } from "../shared/request-logger.ts";
+import { requestLifecycleMiddleware } from "../shared/request-lifecycle.ts";
 import { metricsHandler, agentRunsTotal } from "../shared/metrics.ts";
-import { redactPII, hashTask } from "../shared/redact.ts";
+import { redactPII, hashTask, registerKnownNames } from "../shared/redact.ts";
 import {
   getSpendingSummary,
   getWalletBalance,
@@ -63,8 +63,6 @@ import { createVitalsStore } from "../services/vitals/db.ts";
 import { createVitalsRouter } from "../services/vitals/routes.ts";
 import { getInteractionCheckStore } from "../services/interaction-checks/db.ts";
 import { createInteractionChecksRouter } from "../services/interaction-checks/routes.ts";
-import { getAgentHistoryStore } from "../services/agent-history/db.ts";
-import { createAgentHistoryRouter } from "../services/agent-history/routes.ts";
 import { createCareRecipientsStore } from "../services/care-recipients/db.ts";
 import { authorizeApprovalActor, createDelegationsRouter } from "../services/care-recipients/delegation.ts";
 import { notify } from "../shared/notifications.ts";
@@ -272,9 +270,19 @@ const MAX_TOOL_CALLS_PER_RUN = parseInt(process.env.MAX_TOOL_CALLS_PER_RUN || "3
 // ── Persisted agent-pause state (Issue #17) ──────────────────────────────────
 // Persists to data/agent-state.json so a paused agent stays paused across
 // restarts.  Writes are atomic (tmp + rename) to avoid corrupt reads.
-const AGENT_STATE_FILE = () => `${getDataDir()}/agent-state.json`;
+const AGENT_STATE_FILE = () => process.env.AGENT_STATE_FILE || `${getDataDir()}/agent-state.json`;
 
-function loadAgentState(): { paused: boolean } {
+export async function loadAgentState(): Promise<{ paused: boolean }> {
+  try {
+    const file = AGENT_STATE_FILE();
+    const data = await fsPromises.readFile(file, "utf-8");
+    return JSON.parse(data);
+  } catch {
+    return { paused: false };
+  }
+}
+
+export function loadAgentStateSync(): { paused: boolean } {
   try {
     const file = AGENT_STATE_FILE();
     if (!existsSync(file)) return { paused: false };
@@ -284,18 +292,18 @@ function loadAgentState(): { paused: boolean } {
   }
 }
 
-function saveAgentState(state: { paused: boolean }): void {
+export async function saveAgentState(state: { paused: boolean }): Promise<void> {
   try {
     const file = AGENT_STATE_FILE();
-    const tmp = `${file}.tmp-${Date.now()}`;
-    writeFileSync(tmp, JSON.stringify(state), "utf-8");
-    renameSync(tmp, file);
+    const tmp = `${file}.tmp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    await fsPromises.writeFile(tmp, JSON.stringify(state), "utf-8");
+    await fsPromises.rename(tmp, file);
   } catch (err) {
     logger.warn({ err }, "[agent-state] Failed to persist agent state");
   }
 }
 
-let agentPaused = loadAgentState().paused;
+let agentPaused = (await loadAgentState()).paused;
 
 app.get("/agent/wallet", async (req, res) => {
   const address = agentKeypair.publicKey();
@@ -397,9 +405,9 @@ app.get("/", (_req, res) => {
 app.get("/agent/status", (_req, res) => {
   res.json({ paused: agentPaused });
 });
-app.post("/agent/pause", (_req, res) => {
+app.post("/agent/pause", async (_req, res) => {
   agentPaused = true;
-  saveAgentState({ paused: true });
+  await saveAgentState({ paused: true });
   logger.info("agent paused by caregiver");
   notify({
     level: "warning",
@@ -410,9 +418,9 @@ app.post("/agent/pause", (_req, res) => {
   broadcastSSE("status", { paused: true });
   res.json({ paused: true });
 });
-app.post("/agent/resume", (_req, res) => {
+app.post("/agent/resume", async (_req, res) => {
   agentPaused = false;
-  saveAgentState({ paused: false });
+  await saveAgentState({ paused: false });
   logger.info("agent resumed by caregiver");
   notify({
     level: "info",
@@ -547,7 +555,7 @@ app.get("/agent/transactions", (req, res) => {
   setCurrentRecipient(recipientId);
   res.json(getSpendingTracker());
 });
-app.post("/agent/policy", (req, res) => {
+app.post("/agent/policy", async (req, res) => {
   const result = SpendingPolicySchema.safeParse(req.body);
   if (!result.success) {
     return res
@@ -557,7 +565,7 @@ app.post("/agent/policy", (req, res) => {
   const recipientId = (req.query.recipient_id as string) || "rosa";
   setCurrentRecipient(recipientId);
   setSpendingPolicy(result.data);
-  appendAuditEntry({
+  await appendAuditEntry({
     event: "agent.policy_updated",
     actor: "api",
     details: {
@@ -581,11 +589,11 @@ app.post("/agent/policy/preview", (req, res) => {
   setCurrentRecipient(recipientId);
   res.json({ recipientId, impact: previewSpendingPolicy(result.data) });
 });
-app.post("/agent/reset", (req, res) => {
+app.post("/agent/reset", async (req, res) => {
   const recipientId = (req.query.recipient_id as string) || "rosa";
   setCurrentRecipient(recipientId);
   resetSpendingTracker();
-  appendAuditEntry({
+  await appendAuditEntry({
     event: "agent.reset",
     actor: "api",
     details: {
@@ -700,37 +708,37 @@ app.patch("/agent/profile", (req, res) => {
 });
 
 // --- Adherence endpoints (#264) ---
-app.get("/agent/adherence", (req, res) => {
+app.get("/agent/adherence", async (req, res) => {
   const recipientId = (req.query.recipient_id as string) || "rosa";
-  res.json(getAdherenceStatus(recipientId));
+  res.json(await getAdherenceStatus(recipientId));
 });
 
-app.get("/agent/adherence/pending", (req, res) => {
+app.get("/agent/adherence/pending", async (req, res) => {
   const recipientId = (req.query.recipient_id as string) || "rosa";
-  const pending = getPendingAdherences(recipientId);
+  const pending = await getPendingAdherences(recipientId);
   res.json({ pending, count: pending.length, recipientId });
 });
 
 // #1237: dated adherence events, charted alongside logged vitals.
-app.get("/agent/adherence/timeline", (req, res) => {
+app.get("/agent/adherence/timeline", async (req, res) => {
   const recipientId = (req.query.recipient_id as string) || "rosa";
-  res.json({ recipientId, events: getAdherenceTimeline(recipientId) });
+  res.json({ recipientId, events: await getAdherenceTimeline(recipientId) });
 });
 
-app.post("/agent/adherence/confirm", (req, res) => {
+app.post("/agent/adherence/confirm", async (req, res) => {
   const { record_id } = req.body ?? {};
   if (!record_id)
     return res.status(400).json({ error: "record_id is required" });
-  const success = confirmAdherenceReminder(record_id);
+  const success = await confirmAdherenceReminder(record_id);
   res.json({ success: success.success });
 });
 
 // #1254: the OverviewTab adherence check's "Not Yet" — marks the most recent
 // pending dose as skipped so persistent skips can escalate to flagged.
-app.post("/agent/adherence/skip", (req, res) => {
+app.post("/agent/adherence/skip", async (req, res) => {
   const { record_id } = req.body ?? {};
   if (!record_id) return res.status(400).json({ error: "record_id is required" });
-  const success = skipAdherence(record_id);
+  const success = await skipAdherence(record_id);
   res.json({ success });
 });
 
@@ -1031,11 +1039,10 @@ app.get("/ready", (_req, res) => {
 
 export { app };
 
-if (
-  process.argv[1] &&
-  fileURLToPath(import.meta.url) === resolve(process.argv[1])
-) {
-  const server = app.listen(PORT, async () => {
+let server: ReturnType<typeof app.listen> | undefined;
+
+if (process.env.NODE_ENV !== "test" && !process.env.VITEST) {
+  server = app.listen(PORT, async () => {
     logger.info(
       {
         port: PORT,
@@ -1055,3 +1062,5 @@ if (
 
   gracefulShutdown({ server, onDrainStart: () => { isDraining = true; } });
 }
+
+export { server };
