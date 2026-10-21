@@ -78,14 +78,17 @@ export class StaticProvider extends BasePricingProvider {
 }
 
 /**
- * GoodRx Provider - Scrapes public GoodRx pricing data
- * Uses publicly available pricing information (no API key required)
- * Covers 500+ common prescription drugs
+ * Synthetic pricing provider — illustrative prescription drug prices only (#1032).
+ *
+ * All prices are fabricated from a hardcoded basePrice list with a hash-based
+ * zip-code adjustment (±10%).  There is no external call, no scraping, and no
+ * real GoodRx data.  Named "GoodRx" in historical code; renamed here to avoid
+ * implying a live integration.  The alias below preserves backwards compatibility.
  */
-export class GoodRxProvider extends BasePricingProvider {
+export class SyntheticPricingProvider extends BasePricingProvider {
   name = "goodrx";
-  
-  // Expanded drug database with realistic GoodRx-style pricing
+
+  // Synthetic drug database: prices derived from hardcoded basePrices, not live data.
   private drugDatabase: Record<string, PharmacyPrice[]> = this.generateDrugDatabase();
 
   async getPrices(drugName: string, zipCode?: string): Promise<PharmacyPrice[]> {
@@ -97,7 +100,7 @@ export class GoodRxProvider extends BasePricingProvider {
     const prices = this.drugDatabase[normalized];
     
     if (!prices) {
-      throw new Error(`Drug not found in GoodRx database: ${drugName}`);
+      throw new Error(`Drug not found in synthetic pricing database: ${drugName}`);
     }
 
     // Simulate slight price variation by zip code
@@ -959,9 +962,12 @@ export class CostcoRxProvider extends BasePricingProvider {
   }
 }
 
+/** @deprecated Use SyntheticPricingProvider. Kept for backwards compatibility (#1032). */
+export const GoodRxProvider = SyntheticPricingProvider;
+
 export const PRICING_PROVIDER_CONFIG = [
   { name: "static", description: "Local fallback pricing database", create: () => new StaticProvider() },
-  { name: "goodrx", description: "GoodRx-style prescription pricing database", create: () => new GoodRxProvider() },
+  { name: "goodrx", description: "Synthetic prescription pricing database (illustrative, not live GoodRx data)", create: () => new SyntheticPricingProvider() },
   { name: "costco", description: "Costco Rx pricing database", create: () => new CostcoRxProvider() },
 ] as const;
 

@@ -11,16 +11,18 @@ import { POLICY_FIELD_T_KEY as FIELD_T_KEY } from "../../lib/policy-field-labels
 import type { SpendingData } from "../types";
 import { Bar } from "../primitives/bar";
 import { Toast } from "../primitives/toast";
+import { ContextualHelp } from "../primitives/contextual-help";
 import { getTranslations, type Locale } from "../../i18n";
 import { agentFetch } from "../../lib/agent-fetch";
 
-const FIELDS: Array<keyof SpendingPolicyInput> = [
-  "dailyLimit",
-  "monthlyLimit",
-  "medicationMonthlyBudget",
-  "billMonthlyBudget",
-  "approvalThreshold",
-  "holdTimeSeconds",
+const FIELDS: Array<[keyof SpendingPolicyInput, string]> = [
+  ["dailyLimit", "Daily Spending Limit ($)"],
+  ["monthlyLimit", "Monthly Spending Limit ($)"],
+  ["medicationMonthlyBudget", "Medication Monthly Budget ($)"],
+  ["billMonthlyBudget", "Bill Monthly Budget ($)"],
+  ["approvalThreshold", "Caregiver Approval Threshold ($)"],
+  ["holdTimeSeconds", "Hold Time Before Auto-Approval (seconds)"],
+  ["warningThresholdPct", "Budget Warning Threshold (%)"],
 ];
 
 /** Helper text for fields (#1270) — real-world context to guide non-technical caregivers. */
@@ -35,7 +37,7 @@ const FIELD_HELPERS: Record<string, string> = {
 /** Per-field HTML input constraints — kept in sync with schemas.ts (#211). */
 const FIELD_CONFIG: Record<
   keyof SpendingPolicyInput,
-  { min: number; max: number; step: number }
+  { min?: number; max?: number; step?: number }
 > = {
   dailyLimit: { min: 1, max: 50000, step: 1 },
   monthlyLimit: { min: 1, max: 50000, step: 1 },
@@ -43,6 +45,14 @@ const FIELD_CONFIG: Record<
   billMonthlyBudget: { min: 1, max: 50000, step: 1 },
   approvalThreshold: { min: 1, max: 50000, step: 1 },
   holdTimeSeconds: { min: 0, max: 86400, step: 1 },
+  warningThresholdPct: { min: 1, max: 99, step: 1 },
+};
+
+/** Optional helper hints shown below specific fields. */
+const FIELD_HINT: Partial<Record<keyof SpendingPolicyInput, string>> = {
+  warningThresholdPct:
+    "Sends a notification when spending reaches this % of a budget. The transaction still proceeds — this is a soft alert, not a hard block. Default: 80.",
+  holdTimeSeconds: "0 = auto-approve immediately. Max 86400 (24 h).",
 };
 
 /**
@@ -179,7 +189,10 @@ export interface PolicyTabProps {
   locale?: Locale;
 }
 
-function errorFor(field: keyof SpendingPolicyInput, errors: PolicyFieldError[]) {
+function errorFor(
+  field: keyof SpendingPolicyInput,
+  errors: PolicyFieldError[],
+) {
   return errors.find((e) => e.field === field)?.message;
 }
 
@@ -197,8 +210,12 @@ export function PolicyTab({
   const t = getTranslations(locale);
   const validation = useMemo(() => validatePolicy(policyForm), [policyForm]);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
-  const [toastFallback, setToastFallback] = useState<string | undefined>(undefined);
-  const [confirmRows, setConfirmRows] = useState<PolicyChangeRow[] | null>(null);
+  const [toastFallback, setToastFallback] = useState<string | undefined>(
+    undefined,
+  );
+  const [confirmRows, setConfirmRows] = useState<PolicyChangeRow[] | null>(
+    null,
+  );
   const [requiresTyped, setRequiresTyped] = useState(false);
   const [typedValue, setTypedValue] = useState("");
   const [impactState, setImpactState] = useState<ImpactState | null>(null);
@@ -234,7 +251,14 @@ export function PolicyTab({
         LIMIT_FIELDS.includes(key) &&
         Number.isFinite(before) && Number.isFinite(after) && after > before;
       const doubled = increased && before > 0 && after > before * 2;
-      return { key, label: t.policy[FIELD_T_KEY[key] as keyof typeof t.policy] ?? key, before, after, increased, doubled };
+      return {
+        key,
+        label: FIELD_LABELS[key] ?? key,
+        before,
+        after,
+        increased,
+        doubled,
+      };
     }).filter((row) => row.before !== row.after);
 
     // Nothing changed — there is nothing to preview.
@@ -284,11 +308,15 @@ export function PolicyTab({
       tabIndex={0}
       className="bg-white rounded-xl border border-slate-200 p-6 max-w-lg"
     >
-      <h2 className="text-sm font-semibold text-slate-700 mb-4">
-        {t.policy.title.replace("Rosa", recipient.name)}
-      </h2>
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="text-sm font-semibold text-slate-700 flex items-center">
+          {t.policy.title.replace("Rosa", recipient.name)}
+          <ContextualHelp topicKey="policy_block" caregiverId="caregiver" />
+        </h2>
+      </div>
       <p className="text-xs text-slate-500 mb-6">
-        {t.policy.description}
+        These limits are enforced server-side by the CareGuard agent before
+        every payment.
       </p>
       <form noValidate onSubmit={handleSubmit} className="space-y-4">
         {FIELDS.map((key) => {
@@ -303,7 +331,15 @@ export function PolicyTab({
                 htmlFor={inputId}
                 className="block text-xs font-medium text-slate-600 mb-1"
               >
-                {label}
+                <span className="inline-flex items-center">
+                  {label}
+                  {key === "approvalThreshold" && (
+                    <ContextualHelp topicKey="approval_threshold" caregiverId="caregiver" />
+                  )}
+                  {key === "dailyLimit" && (
+                    <ContextualHelp topicKey="policy_block" caregiverId="caregiver" />
+                  )}
+                </span>
               </label>
               <input
                 id={inputId}
@@ -312,7 +348,11 @@ export function PolicyTab({
                 min={FIELD_CONFIG[key].min}
                 max={FIELD_CONFIG[key].max}
                 step={FIELD_CONFIG[key].step}
-                value={Number.isFinite(policyForm[key]) ? policyForm[key] : ""}
+                value={
+                  Number.isFinite(policyForm[key] as number)
+                    ? policyForm[key]
+                    : ""
+                }
                 aria-invalid={Boolean(errMsg)}
                 aria-describedby={errMsg || warnMsg ? errorId : undefined}
                 onChange={(e) => {
@@ -322,13 +362,14 @@ export function PolicyTab({
                   if (debounceRef.current) clearTimeout(debounceRef.current);
                   debounceRef.current = setTimeout(() => {
                     setPolicyForm((p) => ({ ...p, [key]: parsed }));
-                  }, 300);
-                }}
-                className={`w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 ${errMsg
-                    ? "border-red-400 focus:ring-red-500"
-                    : "border-slate-300 focus:ring-sky-500"
+                  }}
+                  className={`w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 ${
+                    errMsg
+                      ? "border-red-400 focus:ring-red-500"
+                      : "border-slate-300 focus:ring-sky-500"
                   }`}
-              />
+                />
+              )}
               {errMsg && (
                 <p id={errorId} className="mt-1 text-xs text-red-600">
                   {errMsg}
@@ -339,23 +380,9 @@ export function PolicyTab({
                   Warning: {warnMsg}
                 </p>
               )}
-              {FIELD_HELPERS[key] && !errMsg && (
-                <p className="mt-1.5 text-xs text-slate-500 leading-relaxed">
-                  {FIELD_HELPERS[key]}
-                </p>
+              {!errMsg && !warnMsg && FIELD_HINT[key] && (
+                <p className="mt-1 text-xs text-slate-400">{FIELD_HINT[key]}</p>
               )}
-          </div>
-        );
-      })}
-        {spending && (
-          <div className="border border-dashed border-slate-300 rounded-lg p-4">
-            <div className="flex items-center justify-between mb-3">
-              <span className="text-xs font-medium text-slate-600">
-                {t.policyPreview.title}
-              </span>
-              <span className="text-[11px] font-semibold uppercase tracking-wide text-amber-600">
-                {t.policyPreview.unsaved}
-              </span>
             </div>
             <div className="space-y-3">
               <Bar
@@ -499,7 +526,9 @@ export function PolicyTab({
                       {formatPolicyValue(row.key, row.after)}
                     </span>
                     {row.doubled && (
-                      <span className="ml-1 text-red-600">(more than 2&times;)</span>
+                      <span className="ml-1 text-red-600">
+                        (more than 2&times;)
+                      </span>
                     )}
                   </span>
                 </li>
@@ -525,6 +554,9 @@ export function PolicyTab({
               {impactState?.status === "ready" && (
                 <>
                   <p className="text-slate-700">{describePolicyImpact(impactState.impact)}</p>
+                  {impactState.impact.newlyBlocked > 0 && (
+                    <ContextualHelp topicKey="policy_block" variant="inline" className="mt-2 mb-2" />
+                  )}
                   {impactState.impact.entries.some((e) => e.changed) && (
                     <ul className="mt-2 space-y-1">
                       {impactState.impact.entries

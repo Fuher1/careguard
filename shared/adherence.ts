@@ -14,10 +14,13 @@ const ADHERENCE_FILE = `${DATA_DIR}/adherence.jsonl`;
 
 if (!existsSync(DATA_DIR)) mkdirSync(DATA_DIR, { recursive: true });
 
+import { getActiveDosageAtTime } from "./medication-history.ts";
+
 export interface AdherenceRecord {
   id: string;
   recipientId: string;
   drug: string;
+  dosage?: string;
   pharmacy: string;
   orderId: string;
   daysSupply: number;
@@ -137,6 +140,7 @@ export function getAdherenceSummary(recipientId: string) {
 export interface AdherenceTimelineEvent {
   id: string;
   drug: string;
+  dosage?: string;
   /** When the dose was confirmed/skipped, or when it falls due if still pending. */
   date: string;
   status: AdherenceRecord["status"];
@@ -145,6 +149,7 @@ export interface AdherenceTimelineEvent {
 /**
  * Dated adherence events for one recipient, oldest first, so the dashboard can
  * plot them as markers alongside logged vitals (#1237).
+ * Uses the dosage active at the time of each dose (Issue #1227).
  */
 export function adherenceTimeline(
   records: readonly AdherenceRecord[],
@@ -152,12 +157,17 @@ export function adherenceTimeline(
 ): AdherenceTimelineEvent[] {
   return records
     .filter((r) => r.recipientId === recipientId)
-    .map((r) => ({
-      id: r.id,
-      drug: r.drug,
-      date: r.status === "pending" ? r.dueDate : r.confirmedAt ?? r.dueDate,
-      status: r.status,
-    }))
+    .map((r) => {
+      const date = r.status === "pending" ? r.dueDate : r.confirmedAt ?? r.dueDate;
+      const activeDose = r.dosage || getActiveDosageAtTime(r.recipientId, r.drug, date).dosage;
+      return {
+        id: r.id,
+        drug: r.drug,
+        dosage: activeDose,
+        date,
+        status: r.status,
+      };
+    })
     .filter((e) => Number.isFinite(new Date(e.date).getTime()))
     .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
 }

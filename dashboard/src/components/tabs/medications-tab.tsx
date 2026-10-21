@@ -1,15 +1,18 @@
 "use client";
 
-import { useState, useEffect, useMemo } from "react";
-import { toast } from "sonner";
+import { useEffect, useState } from "react";
 import { downloadMedicationPDF } from "../../app/pdf";
 import {
   DrugInteractionResultSchema,
   PharmacyCompareResultSchema,
   type RecipientProfile,
+  type Transaction,
+  ORDER_STATUS,
   type Vital,
   type RecipientAllergy,
   type AllergySeverity,
+  type CaregiverProfile,
+  type ConsentSettings,
 } from "../../lib/types";
 import type { AgentResult } from "../types";
 import { VitalsSection } from "../vitals-section";
@@ -17,16 +20,60 @@ import { InteractionHistorySection } from "../interaction-history-section";
 import { getTranslations, type Locale } from "../../i18n";
 import { AGENT_URL } from "../../lib/agent-url";
 import { agentFetch } from "../../lib/agent-fetch";
+import { ContextualHelp } from "../primitives/contextual-help";
 
 const DEFAULT_MEDS = ["Lisinopril", "Metformin", "Atorvastatin", "Amlodipine"] as const;
+
+type SideEffectEntry = {
+  id: string;
+  recipientId: string;
+  medicationId: string;
+  description: string;
+  severity: "mild" | "moderate" | "severe";
+  timestamp: string;
+};
+
+const DEFAULT_SIDE_EFFECT_FORM = {
+  description: "",
+  severity: "mild" as const,
+};
 
 export interface MedicationsTabProps {
   agentResult: AgentResult | null;
   recipient: RecipientProfile;
+  /** All medication transactions — used to show order lifecycle status. */
+  allTransactions?: Transaction[];
   locale?: Locale;
+  currentCaregiver?: CaregiverProfile;
+  consentSettings?: ConsentSettings;
 }
 
-export function MedicationsTab({ agentResult, recipient, locale = "en" }: MedicationsTabProps) {
+export function MedicationsTab({
+  agentResult,
+  recipient,
+  allTransactions = [],
+  locale = "en",
+  currentCaregiver,
+  consentSettings,
+}: MedicationsTabProps) {
+  // Find the most recent medication order for each drug name
+  const latestOrderByDrug = allTransactions
+    .filter((tx) => tx.type === "medication" && tx.order_status)
+    .reduce<Record<string, Transaction>>((acc, tx) => {
+      const key = tx.description.split(" from ")[0].toLowerCase();
+      if (!acc[key] || new Date(tx.timestamp) > new Date(acc[key].timestamp)) {
+        acc[key] = tx;
+      }
+      return acc;
+    }, {});
+
+  const isRestricted =
+    currentCaregiver &&
+    currentCaregiver.role &&
+    currentCaregiver.role !== "owner" &&
+    consentSettings &&
+    consentSettings[currentCaregiver.role]?.medications === false;
+
   const t = getTranslations(locale).medications;
   const [vitals, setVitals] = useState<Vital[]>([]);
   const hasPriceResults = agentResult?.toolCalls.some(
@@ -35,6 +82,49 @@ export function MedicationsTab({ agentResult, recipient, locale = "en" }: Medica
   const interactionCalls = agentResult?.toolCalls.filter(
     (tc) => tc.tool === "check_drug_interactions",
   );
+  const medications = Array.from(new Set([...(recipient.medications ?? []), ...MEDS]));
+  const storageKey = `careguard-side-effects-${recipient.name?.toLowerCase().replace(/\s+/g, "-") || "recipient"}`;
+  const [entries, setEntries] = useState<Record<string, SideEffectEntry[]>>(() => {
+    if (typeof window === "undefined") return {};
+    try {
+      const raw = window.localStorage.getItem(storageKey);
+      return raw ? JSON.parse(raw) : {};
+    } catch {
+      return {};
+    }
+  });
+  const [forms, setForms] = useState<Record<string, typeof DEFAULT_SIDE_EFFECT_FORM>>(() =>
+    Object.fromEntries(medications.map((med) => [med, { ...DEFAULT_SIDE_EFFECT_FORM }]))
+  );
+
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(storageKey, JSON.stringify(entries));
+    }
+  }, [entries, storageKey]);
+
+  function addEntry(medicationId: string) {
+    const value = forms[medicationId]?.description?.trim();
+    if (!value) return;
+    const nextEntry: SideEffectEntry = {
+      id: `${medicationId}-${Date.now()}`,
+      recipientId: recipient.name,
+      medicationId,
+      description: value,
+      severity: forms[medicationId]?.severity ?? "mild",
+      timestamp: new Date().toISOString(),
+    };
+    setEntries((prev) => ({
+      ...prev,
+      [medicationId]: [...(prev[medicationId] ?? []), nextEntry].sort((a, b) =>
+        new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime(),
+      ),
+    }));
+    setForms((prev) => ({
+      ...prev,
+      [medicationId]: { ...DEFAULT_SIDE_EFFECT_FORM },
+    }));
+  }
 
   // --- Allergies State (Issue #1230) ---
   const [allergies, setAllergies] = useState<RecipientAllergy[]>([
@@ -58,26 +148,103 @@ export function MedicationsTab({ agentResult, recipient, locale = "en" }: Medica
   const [candidateMed, setCandidateMed] = useState("");
   const [optOutMeds, setOptOutMeds] = useState<string[]>([]);
 
+  // --- Medication Dosage History State & Actions (Issue #1227) ---
+  const [dosageHistory, setDosageHistory] = useState<any[]>([]);
+  const [loadingHistory, setLoadingHistory] = useState(false);
+  const [expandedHistoryDrug, setExpandedHistoryDrug] = useState<string | null>(null);
+  const [adjustingDrug, setAdjustingDrug] = useState<string | null>(null);
+  const [newDosageInput, setNewDosageInput] = useState("");
+  const [newFrequencyInput, setNewFrequencyInput] = useState("");
+  const [dosageReasonInput, setDosageReasonInput] = useState("");
+  const [prescriberInput, setPrescriberInput] = useState("");
+  const [savingDosage, setSavingDosage] = useState(false);
+
   // Fetch allergies from backend on load
   useEffect(() => {
+    let isMounted = true;
     async function fetchAllergies() {
       try {
+        if (!isMounted) return;
         setLoadingAllergies(true);
         const res = await agentFetch(`${AGENT_URL}/agent/allergies?recipient_id=rosa`);
-        if (res.ok) {
+        if (res.ok && isMounted) {
           const data = await res.json();
-          if (Array.isArray(data.allergies) && data.allergies.length > 0) {
+          if (Array.isArray(data.allergies) && data.allergies.length > 0 && isMounted) {
             setAllergies(data.allergies);
           }
         }
       } catch {
         // Fall back to local default state
       } finally {
-        setLoadingAllergies(false);
+        if (isMounted) setLoadingAllergies(false);
       }
     }
+
+    async function fetchDosageHistory() {
+      try {
+        if (!isMounted) return;
+        setLoadingHistory(true);
+        const res = await agentFetch(`${AGENT_URL}/agent/medications/history?recipient_id=rosa`);
+        if (res.ok && isMounted) {
+          const data = await res.json();
+          if (Array.isArray(data.history) && isMounted) {
+            setDosageHistory(data.history);
+          }
+        }
+      } catch {
+        // Fallback
+      } finally {
+        if (isMounted) setLoadingHistory(false);
+      }
+    }
+
     fetchAllergies();
+    fetchDosageHistory();
+
+    return () => {
+      isMounted = false;
+    };
   }, []);
+
+  const handleSaveDosageChange = async (drugName: string) => {
+    if (!newDosageInput.trim() || !newFrequencyInput.trim()) {
+      toast.error("Dosage and frequency are required");
+      return;
+    }
+    setSavingDosage(true);
+    try {
+      const res = await agentFetch(`${AGENT_URL}/agent/medications/dosage`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          recipientId: "rosa",
+          medicationName: drugName,
+          newDosage: newDosageInput.trim(),
+          newFrequency: newFrequencyInput.trim(),
+          reason: dosageReasonInput.trim() || undefined,
+          prescriber: prescriberInput.trim() || undefined,
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.entry) {
+          setDosageHistory((prev) => [data.entry, ...prev]);
+        }
+        toast.success(`Recorded new dosage for ${drugName}`);
+        setAdjustingDrug(null);
+        setNewDosageInput("");
+        setNewFrequencyInput("");
+        setDosageReasonInput("");
+        setPrescriberInput("");
+      } else {
+        toast.error("Failed to save dosage change");
+      }
+    } catch {
+      toast.error("Network error while recording dosage change");
+    } finally {
+      setSavingDosage(false);
+    }
+  };
 
   // Save new allergy
   const handleAddAllergy = async (e: React.FormEvent) => {
@@ -173,6 +340,45 @@ export function MedicationsTab({ agentResult, recipient, locale = "en" }: Medica
     });
   };
 
+  if (isRestricted) {
+    return (
+      <div
+        role="tabpanel"
+        id="tabpanel-medications"
+        aria-labelledby="tab-medications"
+        tabIndex={0}
+        className="space-y-6"
+      >
+        <div className="bg-amber-50 border border-amber-200 rounded-xl p-8 text-center max-w-xl mx-auto my-12">
+          <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-amber-100 text-amber-600">
+            <svg
+              className="h-6 w-6"
+              fill="none"
+              viewBox="0 0 24 24"
+              strokeWidth={1.5}
+              stroke="currentColor"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M16.5 10.5V6.75a4.5 4.5 0 1 0-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 0 0 2.25-2.25v-6.75a2.25 2.25 0 0 0-2.25-2.25H6.75a2.25 2.25 0 0 0-2.25 2.25v6.75a2.25 2.25 0 0 0 2.25 2.25Z"
+              />
+            </svg>
+          </div>
+          <h3 className="text-base font-semibold text-amber-900">
+            Access Restricted by Care Recipient
+          </h3>
+          <p className="mt-2 text-sm text-amber-700">
+            Consent settings for {recipient.name} restrict viewing medication records for {currentCaregiver.role} caregivers.
+          </p>
+          <p className="mt-1 text-xs text-amber-600">
+            Contact the primary caregiver to adjust data-sharing permissions in Settings.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div
       role="tabpanel"
@@ -185,35 +391,33 @@ export function MedicationsTab({ agentResult, recipient, locale = "en" }: Medica
       <div className="bg-white rounded-xl border border-slate-200 p-6">
         <div className="flex items-center justify-between mb-4">
           <div>
-            <h2 className="text-sm font-semibold text-slate-700">{t.title}</h2>
+            <div className="flex items-center gap-2">
+              <h2 className="text-sm font-semibold text-slate-700">{t.title}</h2>
+              <ContextualHelp topicKey="dosage_history" caregiverId="caregiver" />
+            </div>
             <p className="text-xs text-slate-500 mt-0.5">
-              Active recurring medications with automated price watch monitoring
+              Active recurring medications with automated price watch monitoring & versioned dosage history
             </p>
           </div>
           <div className="flex flex-col items-end gap-1">
             <button
               onClick={() => {
-                if (!hasPriceResults) return;
-                try {
-                  const priceResults = agentResult!.toolCalls
-                    .filter((tc) => tc.tool === "compare_pharmacy_prices")
-                    .map((tc) => PharmacyCompareResultSchema.parse(tc.result));
-                  const interactionResult = agentResult!.toolCalls.find(
-                    (tc) => tc.tool === "check_drug_interactions",
-                  )?.result;
-                  downloadMedicationPDF(
-                    {
-                      priceResults,
-                      interactionResult: interactionResult
-                        ? DrugInteractionResultSchema.parse(interactionResult)
-                        : undefined,
-                      allergies,
-                    },
-                    { recipient, vitals },
-                  );
-                } catch {
-                  toast.error("Couldn't parse medication result — try again");
-                }
+                const priceResults = agentResult!.toolCalls
+                  .filter((t) => t.tool === "compare_pharmacy_prices")
+                  .map((t) => PharmacyCompareResultSchema.parse(t.result));
+                const interactionResult = agentResult!.toolCalls.find(
+                  (t) => t.tool === "check_drug_interactions",
+                )?.result;
+                downloadMedicationPDF(
+                  {
+                    priceResults,
+                    interactionResult: interactionResult
+                      ? DrugInteractionResultSchema.parse(interactionResult)
+                      : undefined,
+                    sideEffectEntries: Object.values(entries).flat(),
+                  },
+                  { recipient },
+                );
               }}
               disabled={!hasPriceResults}
               title={hasPriceResults ? undefined : t.downloadPdfHint}
@@ -231,50 +435,128 @@ export function MedicationsTab({ agentResult, recipient, locale = "en" }: Medica
         </div>
 
         <div className="space-y-3">
-          {DEFAULT_MEDS.map((drug) => {
+          {medications.map((drug) => {
             const r = agentResult?.toolCalls.find(
               (tc) =>
                 tc.tool === "compare_pharmacy_prices" &&
                 tc.result?.drug?.toLowerCase() === drug.toLowerCase(),
             )?.result;
-            const isOptedOut = optOutMeds.includes(drug);
-
+            const drugEntries = entries[drug] ?? [];
             return (
               <div
                 key={drug}
-                className="flex items-center justify-between p-4 bg-slate-50 rounded-lg border border-slate-100"
+                className="p-4 bg-slate-50 rounded-lg space-y-4"
               >
-                <div>
-                  <div className="flex items-center gap-2">
-                    <span className="font-medium text-sm text-slate-800">{drug}</span>
-                    <button
-                      onClick={() => toggleOptOut(drug)}
-                      title={isOptedOut ? "Click to enable price alerts" : "Click to opt out of price alerts"}
-                      className={`text-[10px] px-2 py-0.5 rounded-full border transition-all cursor-pointer ${
-                        isOptedOut
-                          ? "bg-slate-100 text-slate-500 border-slate-200"
-                          : "bg-emerald-50 text-emerald-700 border-emerald-200"
-                      }`}
-                    >
-                      {isOptedOut ? "🔕 Price Watch Off" : "🔔 Price Watch Active"}
-                    </button>
+                <div className="flex items-center justify-between">
+                  <div>
+                    <div className="font-medium text-sm">{drug}</div>
+                    <div className="text-xs text-slate-500">
+                      {r
+                        ? `Best: ${r.cheapest.pharmacyName} at $${r.cheapest.price}`
+                        : "Not yet compared"}
+                    </div>
                   </div>
-                  <div className={r ? "text-xs text-slate-500 mt-1" : "text-xs text-slate-400 italic mt-1"}>
-                    {r
-                      ? `${t.best}: ${r.cheapest.pharmacyName} at $${r.cheapest.price}`
-                      : t.notYetCompared}
-                  </div>
+                  {r && (
+                    <div className="text-right">
+                      <div className="text-sm font-medium text-green-600">
+                        Save ${r.potentialSavings}/mo
+                      </div>
+                      <div className="text-xs text-slate-400">
+                        {r.savingsPercent}% savings
+                      </div>
+                    </div>
+                  )}
                 </div>
-                {r && (
-                  <div className="text-right">
-                    <div className="text-sm font-semibold text-green-600">
-                      {t.save} ${r.potentialSavings}/mo
-                    </div>
-                    <div className="text-xs text-slate-400">
-                      {r.savingsPercent}% {t.savings}
-                    </div>
+
+                <div className="space-y-2 rounded-lg border border-slate-200 bg-white p-3">
+                  <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                    Side effect journal
                   </div>
-                )}
+                  <div className="grid grid-cols-[1fr_120px_auto] gap-2">
+                    <input
+                      aria-label={`Side effect description for ${drug}`}
+                      value={forms[drug]?.description ?? ""}
+                      onChange={(e) =>
+                        setForms((prev) => ({
+                          ...prev,
+                          [drug]: {
+                            ...(prev[drug] ?? DEFAULT_SIDE_EFFECT_FORM),
+                            description: e.target.value,
+                          },
+                        }))
+                      }
+                      placeholder="Describe observed side effects"
+                      className="px-2 py-1.5 border border-slate-300 rounded-md text-xs focus:outline-none focus:ring-2 focus:ring-sky-500"
+                    />
+                    <select
+                      aria-label={`Severity for ${drug}`}
+                      value={forms[drug]?.severity ?? "mild"}
+                      onChange={(e) =>
+                        setForms((prev) => ({
+                          ...prev,
+                          [drug]: {
+                            ...(prev[drug] ?? DEFAULT_SIDE_EFFECT_FORM),
+                            severity: e.target.value as "mild" | "moderate" | "severe",
+                          },
+                        }))
+                      }
+                      className="px-2 py-1.5 border border-slate-300 rounded-md text-xs focus:outline-none focus:ring-2 focus:ring-sky-500"
+                    >
+                      <option value="mild">Mild</option>
+                      <option value="moderate">Moderate</option>
+                      <option value="severe">Severe</option>
+                    </select>
+                    <button
+                      type="button"
+                      onClick={() => addEntry(drug)}
+                      className="px-2.5 py-1.5 rounded-md bg-sky-500 text-white text-xs font-medium hover:bg-sky-600"
+                    >
+                      Save
+                    </button>
+                <div>
+                  <div className="font-medium text-sm flex items-center gap-2">
+                    {drug}
+                    {latestOrderByDrug[drug.toLowerCase()]?.order_status && (
+                      <span
+                        className={`px-2 py-0.5 rounded text-xs font-medium ${
+                          latestOrderByDrug[drug.toLowerCase()].order_status ===
+                          "picked_up"
+                            ? "bg-green-100 text-green-700"
+                            : latestOrderByDrug[drug.toLowerCase()]
+                                  .order_status === "ready"
+                              ? "bg-amber-100 text-amber-700"
+                              : "bg-slate-100 text-slate-500"
+                        }`}
+                      >
+                        {latestOrderByDrug[drug.toLowerCase()].order_status ===
+                        "picked_up"
+                          ? "✓ Picked up"
+                          : latestOrderByDrug[drug.toLowerCase()]
+                                .order_status === "ready"
+                            ? "⏳ Ready for pickup"
+                            : "📦 Submitted"}
+                      </span>
+                    )}
+                  </div>
+
+                  {drugEntries.length > 0 ? (
+                    <ul className="space-y-2">
+                      {drugEntries.map((entry) => (
+                        <li key={entry.id} className="rounded-md border border-slate-200 bg-slate-50 p-2">
+                          <div className="flex items-center justify-between gap-2 text-[11px] text-slate-500">
+                            <span>{new Date(entry.timestamp).toLocaleDateString()}</span>
+                            <span className={`px-1.5 py-0.5 rounded-full ${entry.severity === "severe" ? "bg-red-100 text-red-700" : entry.severity === "moderate" ? "bg-amber-100 text-amber-700" : "bg-emerald-100 text-emerald-700"}`}>
+                              {entry.severity}
+                            </span>
+                          </div>
+                          <p className="mt-1 text-xs text-slate-700">{entry.description}</p>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p className="text-[11px] text-slate-500">No side effects logged yet.</p>
+                  )}
+                </div>
               </div>
             );
           })}
@@ -483,9 +765,12 @@ export function MedicationsTab({ agentResult, recipient, locale = "en" }: Medica
         <div className="bg-white rounded-xl border border-slate-200 p-6">
           <div className="flex items-center justify-between mb-4">
             <div>
-              <h2 className="text-sm font-semibold text-slate-700">
-                {t.drugInteractions}
-              </h2>
+              <div className="flex items-center gap-2">
+                <h2 className="text-sm font-semibold text-slate-700">
+                  {t.drugInteractions}
+                </h2>
+                <ContextualHelp topicKey="drug_interaction_warning" caregiverId="caregiver" />
+              </div>
               <p className="text-xs text-slate-500 mt-0.5">
                 Drug-to-drug interactions (independent of personal allergy contraindications)
               </p>

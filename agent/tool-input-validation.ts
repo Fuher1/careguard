@@ -27,7 +27,10 @@ export const TOOL_INPUT_SCHEMAS = {
     .strict(),
   audit_medical_bill: z
     .object({
-      line_items_json: z.string().min(1),
+      line_items_json: z.string().min(1).optional(),
+      line_items: z.any().optional(),
+      provider_id: z.string().optional(),
+      provider_name: z.string().optional(),
       recipient_id: recipientIdSchema,
     })
     .strict(),
@@ -52,6 +55,8 @@ export const TOOL_INPUT_SCHEMAS = {
       amount: amountSchema,
       days_supply: amountSchema.optional(),
       recipient_id: recipientIdSchema,
+      cost_split: z.any().optional(),
+      skip_approval: z.boolean().optional(),
     })
     .strict(),
   pay_bill: z
@@ -61,6 +66,8 @@ export const TOOL_INPUT_SCHEMAS = {
       description: z.string().min(1),
       amount: amountSchema,
       recipient_id: recipientIdSchema,
+      cost_split: z.any().optional(),
+      skip_approval: z.boolean().optional(),
     })
     .strict(),
   check_spending_policy: z
@@ -91,6 +98,15 @@ export const TOOL_INPUT_SCHEMAS = {
       facility: z.string().optional(),
       caregiver_name: z.string().optional(),
       caregiver_email: z.string().optional(),
+      reason: z
+        .enum([
+          "duplicate_charge",
+          "coding_error",
+          "balance_billing",
+          "unbundling",
+          "general_dispute",
+        ])
+        .optional(),
       recipient_id: recipientIdSchema,
     })
     .strict(),

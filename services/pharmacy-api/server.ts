@@ -22,7 +22,7 @@ import { applySecurityMiddleware } from "../../shared/security-middleware.ts";
 import { createPharmacyAdminAuth } from "../../shared/pharmacy-admin-auth.ts";
 import { logger } from "../../shared/logger.ts";
 import { requestLifecycleMiddleware } from "../../shared/request-lifecycle.ts";
-import { pharmacyUnknownDrugTotal } from "../../shared/metrics.ts";
+import { metricsHandler, pharmacyUnknownDrugTotal } from "../../shared/metrics.ts";
 import type { PharmacyPricingStore } from "./db.ts";
 import { createPharmacyPricingStore } from "./db.ts";
 import { resolveRequestedDosage } from "./dosage.ts";
@@ -81,6 +81,10 @@ export function createPharmacyApp(options: PharmacyAppOptions) {
       drugCount: pricingStore.getDrugCount(),
     });
   });
+
+  // Prometheus metrics for standalone mode — shares the registry (and
+  // METRICS_TOKEN gating) with the unified server via shared/metrics.ts.
+  app.get("/metrics", metricsHandler());
 
   app.get("/pharmacy/drugs", (_req, res) => {
     const drugs = pricingStore.listDrugs();

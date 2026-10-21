@@ -8,6 +8,7 @@ export const BillLineItemSchema = z.object({
   status: z.enum(["valid", "duplicate", "upcoded", "unbundled", "error"]),
   suggestedAmount: z.number().optional(),
   errorDescription: z.string().optional(),
+  annotation: z.string().optional(),
 });
 
 export const BillAuditResultSchema = z.object({
@@ -27,7 +28,7 @@ export const PharmacyPriceSchema = z.object({
   pharmacyId: z.string().optional(),
   price: z.number(),
   distance: z.string().optional(),
-  inStock: z.union([z.boolean(), z.literal('unknown')]).optional(),
+  inStock: z.union([z.boolean(), z.literal("unknown")]).optional(),
 });
 
 export const PharmacyCompareResultSchema = z.object({
@@ -69,9 +70,36 @@ export const TransactionSchema = z.object({
   pendingUntil: z.string().optional(),
   status: z.string(),
   category: z.string(),
+  // Optional caregiver-authored memo for record-keeping (Feature: payment memo).
+  memo: z.string().optional(),
+  // Medication order fulfilment lifecycle (Feature: order tracking).
+  order_status: z.enum(["submitted", "ready", "picked_up"]).optional(),
+  order_status_history: z
+    .array(
+      z.object({
+        status: z.enum(["submitted", "ready", "picked_up"]),
+        timestamp: z.string(),
+        updatedBy: z.string(),
+      }),
+    )
+    .optional(),
 });
 
 export type Transaction = z.infer<typeof TransactionSchema>;
+
+export const ORDER_STATUS = {
+  SUBMITTED: "submitted",
+  READY: "ready",
+  PICKED_UP: "picked_up",
+} as const;
+
+export const ORDER_STATUSES = [
+  ORDER_STATUS.SUBMITTED,
+  ORDER_STATUS.READY,
+  ORDER_STATUS.PICKED_UP,
+] as const;
+
+export type OrderStatus = (typeof ORDER_STATUSES)[number];
 
 export const AuditLogSchema = z.object({
   timestamp: z.string(),
@@ -82,13 +110,23 @@ export const AuditLogSchema = z.object({
 
 export type AuditLogEvent = z.infer<typeof AuditLogSchema>;
 
+export const CategoryTotalsSchema = z.object({
+  medications: z.number(),
+  bills: z.number(),
+  serviceFees: z.number(),
+  total: z.number(),
+  count: z.number(),
+});
+
 export const SpendingDataSchema = z.object({
   policy: z.object({
     dailyLimit: z.number(),
     monthlyLimit: z.number(),
     medicationMonthlyBudget: z.number(),
     billMonthlyBudget: z.number(),
-    approvalThreshold: z.number(), holdTimeSeconds: z.number().optional().default(86400),
+    approvalThreshold: z.number(),
+    holdTimeSeconds: z.number().optional().default(86400),
+    warningThresholdPct: z.number().optional(),
   }),
   spending: z.object({
     medications: z.number(),
@@ -102,9 +140,18 @@ export const SpendingDataSchema = z.object({
   }),
   transactionCount: z.number(),
   recentTransactions: z.array(TransactionSchema),
+  // #1185: per-category totals per range. Optional so older agents still parse.
+  categoryBreakdown: z
+    .object({
+      "7d": CategoryTotalsSchema,
+      "30d": CategoryTotalsSchema,
+      all: CategoryTotalsSchema,
+    })
+    .optional(),
 });
 
 export type SpendingData = z.infer<typeof SpendingDataSchema>;
+export type CategoryTotals = z.infer<typeof CategoryTotalsSchema>;
 
 export type RecipientProfile = {
   name: string;
@@ -181,6 +228,33 @@ export const InteractionCheckSchema = z.object({
 
 export type InteractionCheck = z.infer<typeof InteractionCheckSchema>;
 
+/** A record an agent tool invocation produced, for link-through from history. */
+export const AgentHistoryLinkSchema = z.object({
+  kind: z.enum(["transaction", "dispute", "bill_audit", "interaction_check", "approval"]),
+  id: z.string().optional(),
+  label: z.string(),
+  stellarTxHash: z.string().optional(),
+});
+
+export type AgentHistoryLink = z.infer<typeof AgentHistoryLinkSchema>;
+
+/** A persisted agent tool invocation and its outcome (redacted server-side). */
+export const AgentHistoryEntrySchema = z.object({
+  id: z.string(),
+  recipient_id: z.string(),
+  run_id: z.string().nullable(),
+  task: z.string().nullable(),
+  tool: z.string(),
+  input: z.record(z.string(), z.unknown()),
+  status: z.enum(["success", "error", "blocked", "pending"]),
+  summary: z.string(),
+  error: z.string().nullable(),
+  links: z.array(AgentHistoryLinkSchema),
+  created_at: z.string(),
+});
+
+export type AgentHistoryEntry = z.infer<typeof AgentHistoryEntrySchema>;
+
 /** Human-readable reading, e.g. "128/82 mmHg" or "162 lb". */
 export function formatVital(v: Pick<Vital, "type" | "value" | "secondary_value" | "unit">): string {
   const reading =
@@ -254,3 +328,61 @@ export const HandoffNoteSchema = z.object({
 });
 
 export type HandoffNote = z.infer<typeof HandoffNoteSchema>;
+
+// ── Granular Data-Sharing Consent (#1218) ─────────────────────────────────────
+
+export interface RoleConsent {
+  medications: boolean;
+  bills: boolean;
+  wallet: boolean;
+}
+
+export interface ConsentSettings {
+  owner: RoleConsent;
+  "co-caregiver": RoleConsent;
+  viewer: RoleConsent;
+}
+
+export const DEFAULT_CONSENT_SETTINGS: ConsentSettings = {
+  owner: { medications: true, bills: true, wallet: true },
+  "co-caregiver": { medications: true, bills: true, wallet: true },
+  viewer: { medications: true, bills: true, wallet: true },
+};
+
+// ── Cost Splitting Ledger (#1220) ───────────────────────────────────────────
+
+export interface CostSplitShare {
+  caregiverId: string;
+  caregiverName: string;
+  amount: number;
+  status: "owed" | "settled";
+  settledAt?: string;
+  settledBy?: string;
+}
+
+export interface CostSplit {
+  id: string;
+  transactionId: string;
+  recipientId: string;
+  totalAmount: number;
+  payerId: string;
+  payerName: string;
+  description?: string;
+  shares: CostSplitShare[];
+  createdAt: string;
+}
+
+export interface ContributorBalance {
+  fromCaregiverId: string;
+  fromCaregiverName: string;
+  toCaregiverId: string;
+  toCaregiverName: string;
+  amount: number;
+}
+
+export interface ContributorBalanceSummary {
+  balances: ContributorBalance[];
+  totalOwed: number;
+  totalSettled: number;
+}
+

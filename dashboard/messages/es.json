@@ -20,6 +20,7 @@
     "policy": "Política",
     "wallet": "Billetera",
     "activity": "Actividad",
+    "tasks": "Tareas",
     "notes": "Notas",
     "settings": "Ajustes"
   },
@@ -143,7 +144,19 @@
     "fundModalNote": "Esto abre un sitio web externo. Asegúrese de visitar el grifo oficial de Circle, no un sitio de phishing.",
     "fundContinue": "Continuar al Grifo",
     "howPayments": "Cómo Funcionan los Pagos",
-    "balanceUnavailable": "No se pudo cargar el saldo. Verifique su conexión o que la billetera del agente esté configurada, luego intente de nuevo."
+    "balanceUnavailable": "No se pudo cargar el saldo. Verifique su conexión o que la billetera del agente esté configurada, luego intente de nuevo.",
+    "spendingByCategory": "Gastos por Categoría",
+    "spendingByCategoryDesc": "En qué se gastó el dinero del agente, según los pagos completados.",
+    "categoryMedications": "Farmacia (medicamentos)",
+    "categoryBills": "Facturas (tras los ajustes de la auditoría)",
+    "categoryFees": "Tarifas de servicio (consultas de API)",
+    "breakdownRange": "Período",
+    "range7d": "7 días",
+    "range30d": "30 días",
+    "rangeAll": "Todo",
+    "breakdownTotal": "Total",
+    "noSpendingInRange": "No hay pagos completados en este período.",
+    "rangeUnavailable": "Este agente solo informa totales históricos, así que el período no se puede cambiar."
   },
   "settings": {
     "recipient": "Paciente",
