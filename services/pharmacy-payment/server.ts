@@ -31,6 +31,13 @@ import {
   MedicationOrderSchema,
   type MedicationOrderInput,
 } from "./validation.ts";
+import {
+  metricsHandler,
+  pharmacyPaymentOrdersTotal,
+  pharmacyMppChargesTotal,
+  paymentsUsdcTotal,
+  stellarTxSubmittedTotal,
+} from "../../shared/metrics.ts";
 
 const PORT = parseInt(process.env.PHARMACY_PAYMENT_PORT || "3005", 10);
 const RECIPIENT = process.env.PHARMACY_1_PUBLIC_KEY;
@@ -129,6 +136,9 @@ app.get("/", (_req, res) => {
 app.get("/pharmacy/orders", (_req, res) => {
   res.json({ orders: loadOrders() });
 });
+
+// GET /metrics endpoint for Prometheus instrumentation (Issue #1015)
+app.get("/metrics", metricsHandler());
 
 // MPP charge server
 const mppx = Mppx.create({

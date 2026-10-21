@@ -33,6 +33,7 @@ import { applySecurityMiddleware } from "./shared/security-middleware.ts";
 import { createApiDocsRouter } from "./shared/api-docs.ts";
 import { logger } from "./shared/logger.ts";
 import { requireApiKey } from "./shared/auth.ts";
+import { createPharmacyAdminAuth } from "./shared/pharmacy-admin-auth.ts";
 import {
   validateTask,
   getSuspiciousTaskCount,
@@ -135,8 +136,7 @@ import { createVitalsStore } from "./services/vitals/db.ts";
 import { createVitalsRouter } from "./services/vitals/routes.ts";
 import { getInteractionCheckStore } from "./services/interaction-checks/db.ts";
 import { createInteractionChecksRouter } from "./services/interaction-checks/routes.ts";
-import { getAgentHistoryStore } from "./services/agent-history/db.ts";
-import { createAgentHistoryRouter } from "./services/agent-history/routes.ts";
+import { createCarePlanRouter } from "./services/care-plan/routes.ts";
 import {
   buildCompareResponse,
   DrugRecordSchema,
@@ -1212,22 +1212,22 @@ const _piiScrub = process.env.LLM_PII_SCRUB !== "false";
 app.get("/agent/status", (_req, res) => {
   res.json(getAgentState());
 });
-app.post("/agent/pause", (req, res) => {
+app.post("/agent/pause", async (req, res) => {
   const raw = req.body?.reason;
   const reason: PauseReason =
     raw === "low-balance-usdc" || raw === "low-balance-xlm" ? raw : "manual";
   const state = pauseAgent(reason);
-  appendAuditEntry({
+  await appendAuditEntry({
     event: "agent.paused",
     actor: "api",
     details: { reason },
   });
   res.json(state);
 });
-app.post("/agent/resume", (_req, res) => {
+app.post("/agent/resume", async (_req, res) => {
   const prev = getAgentState();
   const state = resumeAgent();
-  appendAuditEntry({
+  await appendAuditEntry({
     event: "agent.resumed",
     actor: "api",
     details: { previousReason: prev.pausedReason },
@@ -1246,7 +1246,7 @@ app.get("/agent/transactions", (req, res) => {
   );
   res.json({ ...tracker, transactions, pagination });
 });
-app.post("/agent/policy", (req, res) => {
+app.post("/agent/policy", async (req, res) => {
   const result = SpendingPolicySchema.safeParse(req.body);
   if (!result.success) {
     return res
@@ -1254,7 +1254,7 @@ app.post("/agent/policy", (req, res) => {
       .json({ error: "Invalid policy", issues: result.error.issues });
   }
   setSpendingPolicy(result.data);
-  appendAuditEntry({
+  await appendAuditEntry({
     event: "agent.policy_updated",
     actor: "api",
     details: {
@@ -1286,8 +1286,7 @@ app.post("/agent/adherence/confirm", (req, res) => {
 app.use("/agent", createVitalsRouter(createVitalsStore()));
 // #1193: searchable history of past drug interaction checks.
 app.use("/agent", createInteractionChecksRouter(getInteractionCheckStore()));
-// Searchable transcript of agent tool invocations and their outcomes.
-app.use("/agent", createAgentHistoryRouter(getAgentHistoryStore()));
+app.use("/agent/care-plan", createCarePlanRouter());
 // #1238: preview a policy change against recent payment history.
 app.post("/agent/policy/preview", (req, res) => {
   const result = SpendingPolicySchema.safeParse(req.body);
@@ -1298,9 +1297,9 @@ app.post("/agent/policy/preview", (req, res) => {
   }
   res.json({ impact: previewSpendingPolicy(result.data) });
 });
-app.post("/agent/reset", (req, res) => {
+app.post("/agent/reset", async (req, res) => {
   resetSpendingTracker();
-  appendAuditEntry({
+  await appendAuditEntry({
     event: "agent.reset",
     actor: "api",
     details: {
